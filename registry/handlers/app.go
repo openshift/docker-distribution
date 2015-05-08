@@ -410,6 +410,20 @@ func (app *App) RegisterHealthChecks(healthRegistries ...*health.Registry) {
 	}
 }
 
+type customAccessRecordsFunc func(*http.Request) []auth.Access
+
+func NoCustomAccessRecords(*http.Request) []auth.Access {
+	return []auth.Access{}
+}
+
+func NameNotRequired(*http.Request) bool {
+	return false
+}
+
+func NameRequired(*http.Request) bool {
+	return true
+}
+
 // register a handler with the application, by route name. The handler will be
 // passed through the application filters and context will be constructed at
 // request time.
@@ -424,11 +438,14 @@ func (app *App) register(routeName string, dispatch dispatchFunc) {
 		handler = metrics.InstrumentHandler(httpMetrics, handler)
 	}
 
+func (app *App) RegisterRoute(route *mux.Route, dispatch dispatchFunc, nameRequired nameRequiredFunc, accessRecords customAccessRecordsFunc) {
 	// TODO(stevvooe): This odd dispatcher/route registration is by-product of
 	// some limitations in the gorilla/mux router. We are using it to keep
 	// routing consistent between the client and server, but we may want to
 	// replace it with manual routing and structure-based dispatch for better
 	// control over the request execution.
+	route.Handler(app.dispatcher(dispatch, nameRequired, accessRecords))
+}
 
 	app.router.GetRoute(routeName).Handler(handler)
 }
@@ -641,7 +658,7 @@ type dispatchFunc func(ctx *Context, r *http.Request) http.Handler
 
 // dispatcher returns a handler that constructs a request specific context and
 // handler, using the dispatch factory function.
-func (app *App) dispatcher(dispatch dispatchFunc) http.Handler {
+func (app *App) dispatcher(dispatch dispatchFunc, nameRequired nameRequiredFunc, accessRecords customAccessRecordsFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for headerName, headerValues := range app.Config.HTTP.Headers {
 			for _, value := range headerValues {
@@ -806,6 +823,7 @@ func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Cont
 	}
 
 	var accessRecords []auth.Access
+	accessRecords = append(accessRecords, customAccessRecords...)
 
 	if repo != "" {
 		accessRecords = appendAccessRecords(accessRecords, r.Method, repo)
@@ -814,9 +832,10 @@ func (app *App) authorized(w http.ResponseWriter, r *http.Request, context *Cont
 			// access to the source repository.
 			accessRecords = appendAccessRecords(accessRecords, "GET", fromRepo)
 		}
-	} else {
+	}
+	if len(accessRecords) == 0 {
 		// Only allow the name not to be set on the base route.
-		if app.nameRequired(r) {
+		if nameRequired(r) {
 			// For this to be properly secured, repo must always be set for a
 			// resource that may make a modification. The only condition under
 			// which name is not set and we still allow access is when the
@@ -871,6 +890,8 @@ func (app *App) eventBridge(ctx *Context, r *http.Request) notifications.Listene
 
 	return notifications.NewBridge(ctx.urlBuilder, app.events.source, actor, request, app.events.sink)
 }
+
+type nameRequiredFunc func(*http.Request) bool
 
 // nameRequired returns true if the route requires a name.
 func (app *App) nameRequired(r *http.Request) bool {
