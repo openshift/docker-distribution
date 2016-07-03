@@ -9,7 +9,6 @@ import (
 	"net/http"
 
 	"golang.org/x/oauth2"
-	"google.golang.org/grpc"
 )
 
 type DialOpt struct {
@@ -20,5 +19,4 @@ type DialOpt struct {
 	TokenSource oauth2.TokenSource
 
 	HTTPClient *http.Client
-	GRPCClient *grpc.ClientConn
 }

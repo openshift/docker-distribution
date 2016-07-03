@@ -19,7 +19,6 @@ import (
 
 	"golang.org/x/oauth2"
 	"google.golang.org/cloud/internal/opts"
-	"google.golang.org/grpc"
 )
 
 // ClientOption is used when construct clients for each cloud service.
@@ -84,17 +83,4 @@ type withBaseHTTP struct{ client *http.Client }
 
 func (w withBaseHTTP) Resolve(o *opts.DialOpt) {
 	o.HTTPClient = w.client
-}
-
-// WithBaseGRPC returns a ClientOption that specifies the GRPC client
-// connection to use as the basis of communications. This option many only be
-// used with services that support HRPC as their communication transport.
-func WithBaseGRPC(client *grpc.ClientConn) ClientOption {
-	return withBaseGRPC{client}
-}
-
-type withBaseGRPC struct{ client *grpc.ClientConn }
-
-func (w withBaseGRPC) Resolve(o *opts.DialOpt) {
-	o.GRPCClient = w.client
 }
