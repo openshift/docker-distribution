@@ -23,6 +23,10 @@ var (
 	enforceRepoClass bool
 )
 
+var (
+	enforceRepoClass bool
+)
+
 func main() {
 	var (
 		issuer = &TokenIssuer{}
