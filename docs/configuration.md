@@ -1082,6 +1082,7 @@ features. Each subsection defines such a feature with configurable behavior.
 
 ```none
 validation:
+  enabled: true
   manifests:
     urls:
       allow:
