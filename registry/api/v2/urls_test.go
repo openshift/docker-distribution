@@ -287,6 +287,7 @@ func TestBuilderFromRequest(t *testing.T) {
 			name: "forwarded standard port with non-standard headers",
 			request: &http.Request{URL: u, Host: u.Host, Header: http.Header{
 				"X-Forwarded-Proto": []string{"https"},
+				"X-Forwarded-Host":  []string{"example.com"},
 				"X-Forwarded-Port":  []string{"443"},
 			}},
 			base: "https://example.com",
@@ -295,6 +296,7 @@ func TestBuilderFromRequest(t *testing.T) {
 			name: "forwarded standard port with non-standard headers and explicit port",
 			request: &http.Request{URL: u, Host: u.Host + ":443", Header: http.Header{
 				"X-Forwarded-Proto": []string{"https"},
+				"X-Forwarded-Host":  []string{u.Host + ":443"},
 				"X-Forwarded-Port":  []string{"443"},
 			}},
 			base: "https://example.com:443",
