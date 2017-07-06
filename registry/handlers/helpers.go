@@ -39,6 +39,11 @@ func copyFullPayload(ctx context.Context, responseWriter http.ResponseWriter, r 
 		body = http.MaxBytesReader(responseWriter, body, limit)
 	}
 
+	var body = r.Body
+	if limit > 0 {
+		body = http.MaxBytesReader(responseWriter, body, limit)
+	}
+
 	// Read in the data, if any.
 	copied, err := io.Copy(destWriter, body)
 	if clientClosed != nil && (err != nil || (r.ContentLength > 0 && copied < r.ContentLength)) {
