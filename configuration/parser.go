@@ -216,7 +216,7 @@ func (p *Parser) overwriteStruct(v reflect.Value, fullpath string, path []string
 	switch sf.Type.Kind() {
 	case reflect.Map:
 		if field.IsNil() {
-			field.Set(reflect.MakeMap(sf.Type))
+			field.Set(reflect.MakeMap(field.Type().Elem()))
 		}
 	case reflect.Ptr:
 		if field.IsNil() {
