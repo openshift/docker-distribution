@@ -797,7 +797,7 @@ func TestManifestFetchWithAccept(t *testing.T) {
 	defer close(headers)
 	defer s.Close()
 
-	r, err := NewRepository(repo, s.URL, nil)
+	r, err := NewRepository(context.Background(), repo, s.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
