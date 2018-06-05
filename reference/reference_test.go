@@ -122,7 +122,7 @@ func TestReferenceParse(t *testing.T) {
 		},
 		{
 			input:      strings.Repeat("a/", 127) + "a:tag-puts-this-over-max",
-			domain:     "a",
+			domain:     "",
 			repository: strings.Repeat("a/", 127) + "a",
 			tag:        "tag-puts-this-over-max",
 		},
@@ -167,7 +167,7 @@ func TestReferenceParse(t *testing.T) {
 		},
 		{
 			input:      "foo/foo_bar.com:8080",
-			domain:     "foo",
+			domain:     "",
 			repository: "foo/foo_bar.com",
 			tag:        "8080",
 		},

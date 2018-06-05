@@ -45,7 +45,11 @@ func ParseNormalizedNamed(s string) (Named, error) {
 		return nil, errors.New("invalid reference format: repository name must be lowercase")
 	}
 
-	ref, err := Parse(domain + "/" + remainder)
+	name := remainder
+	if domain != "" {
+		name = domain + "/" + remainder
+	}
+	ref, err := Parse(name)
 	if err != nil {
 		return nil, err
 	}
@@ -56,16 +60,11 @@ func ParseNormalizedNamed(s string) (Named, error) {
 	return named, nil
 }
 
-// splitDockerDomain splits a repository name to domain and remotename string.
-// If no valid domain is found, the default domain is used. Repository name
-// needs to be already validated before.
+// splitDockerDomain splits a repository name to domain and remotename
+// string. If no valid domain is found, then domain is "". Repository
+// name needs to be already validated before.
 func splitDockerDomain(name string) (domain, remainder string) {
-	i := strings.IndexRune(name, '/')
-	if i == -1 || (!strings.ContainsAny(name[:i], ".:") && name[:i] != "localhost") {
-		domain, remainder = defaultDomain, name
-	} else {
-		domain, remainder = name[:i], name[i+1:]
-	}
+	domain, remainder = splitRepoName(name)
 	if domain == legacyDefaultDomain {
 		domain = defaultDomain
 	}
@@ -75,26 +74,12 @@ func splitDockerDomain(name string) (domain, remainder string) {
 	return
 }
 
-// familiarizeName returns a shortened version of the name familiar
-// to to the Docker UI. Familiar names have the default domain
-// "docker.io" and "library/" repository prefix removed.
-// For example, "docker.io/library/redis" will have the familiar
-// name "redis" and "docker.io/dmcgowan/myapp" will be "dmcgowan/myapp".
-// Returns a familiarized named only reference.
+// familiarizeName is a no-op and returns named
 func familiarizeName(named namedRepository) repository {
-	repo := repository{
+	return repository{
 		domain: named.Domain(),
 		path:   named.Path(),
 	}
-
-	if repo.domain == defaultDomain {
-		repo.domain = ""
-		// Handle official repositories which have the pattern "library/<official repo name>"
-		if split := strings.Split(repo.path, "/"); len(split) == 2 && split[0] == officialRepoName {
-			repo.path = split[1]
-		}
-	}
-	return repo
 }
 
 func (r reference) Familiar() Named {
