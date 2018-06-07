@@ -133,28 +133,28 @@ func TestParseRepositoryInfo(t *testing.T) {
 	tcases := []tcase{
 		{
 			RemoteName:    "fooo/bar",
-			FamiliarName:  "docker.io/fooo/bar",
+			FamiliarName:  "fooo/bar",
 			FullName:      "docker.io/fooo/bar",
 			AmbiguousName: "index.docker.io/fooo/bar",
 			Domain:        "docker.io",
 		},
 		{
 			RemoteName:    "library/ubuntu",
-			FamiliarName:  "docker.io/library/ubuntu",
+			FamiliarName:  "ubuntu",
 			FullName:      "docker.io/library/ubuntu",
 			AmbiguousName: "library/ubuntu",
 			Domain:        "docker.io",
 		},
 		{
 			RemoteName:    "nonlibrary/ubuntu",
-			FamiliarName:  "docker.io/nonlibrary/ubuntu",
+			FamiliarName:  "nonlibrary/ubuntu",
 			FullName:      "docker.io/nonlibrary/ubuntu",
 			AmbiguousName: "",
 			Domain:        "docker.io",
 		},
 		{
 			RemoteName:    "other/library",
-			FamiliarName:  "docker.io/other/library",
+			FamiliarName:  "other/library",
 			FullName:      "docker.io/other/library",
 			AmbiguousName: "",
 			Domain:        "docker.io",
@@ -203,28 +203,28 @@ func TestParseRepositoryInfo(t *testing.T) {
 		},
 		{
 			RemoteName:    "library/ubuntu-12.04-base",
-			FamiliarName:  "docker.io/library/ubuntu-12.04-base",
+			FamiliarName:  "ubuntu-12.04-base",
 			FullName:      "docker.io/library/ubuntu-12.04-base",
 			AmbiguousName: "index.docker.io/library/ubuntu-12.04-base",
 			Domain:        "docker.io",
 		},
 		{
 			RemoteName:    "library/foo",
-			FamiliarName:  "docker.io/library/foo",
+			FamiliarName:  "foo",
 			FullName:      "docker.io/library/foo",
 			AmbiguousName: "docker.io/foo",
 			Domain:        "docker.io",
 		},
 		{
 			RemoteName:    "library/foo/bar",
-			FamiliarName:  "docker.io/library/foo/bar",
+			FamiliarName:  "library/foo/bar",
 			FullName:      "docker.io/library/foo/bar",
 			AmbiguousName: "",
 			Domain:        "docker.io",
 		},
 		{
 			RemoteName:    "store/foo/bar",
-			FamiliarName:  "docker.io/store/foo/bar",
+			FamiliarName:  "store/foo/bar",
 			FullName:      "docker.io/store/foo/bar",
 			AmbiguousName: "",
 			Domain:        "docker.io",
@@ -280,7 +280,7 @@ func TestParseReferenceWithTagAndDigest(t *testing.T) {
 	if _, isCanonical := ref.(Canonical); !isCanonical {
 		t.Fatalf("Reference from %q should support digest", ref)
 	}
-	if expected, actual := "docker.io/library/"+shortRef, FamiliarString(ref); actual != expected {
+	if expected, actual := shortRef, FamiliarString(ref); actual != expected {
 		t.Fatalf("Invalid parsed reference for %q: expected %q, got %q", ref, expected, actual)
 	}
 }
@@ -574,28 +574,28 @@ func TestMatch(t *testing.T) {
 			expected:  false,
 		},
 		{
-			reference: "docker.io/library/foo/a/bar",
-			pattern:   "docker.io/library/foo/**/ba[rz]",
+			reference: "foo/a/bar",
+			pattern:   "foo/**/ba[rz]",
 			expected:  true,
 		},
 		{
-			reference: "docker.io/library/foo/b/baz",
-			pattern:   "docker.io/library/foo/**/ba[rz]",
+			reference: "foo/b/baz",
+			pattern:   "foo/**/ba[rz]",
 			expected:  true,
 		},
 		{
-			reference: "docker.io/library/foo/c/baz:tag",
-			pattern:   "docker.io/library/foo/**/ba[rz]",
+			reference: "foo/c/baz:tag",
+			pattern:   "foo/**/ba[rz]",
 			expected:  true,
 		},
 		{
-			reference: "docker.io/library/foo/c/baz:tag",
-			pattern:   "docker.io/library/foo/*/baz:tag",
+			reference: "foo/c/baz:tag",
+			pattern:   "foo/*/baz:tag",
 			expected:  true,
 		},
 		{
-			reference: "docker.io/library/foo/c/baz:tag",
-			pattern:   "docker.io/library/foo/c/baz:tag",
+			reference: "foo/c/baz:tag",
+			pattern:   "foo/c/baz:tag",
 			expected:  true,
 		},
 		{
