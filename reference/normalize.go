@@ -34,7 +34,10 @@ func ParseNormalizedNamed(s string) (Named, error) {
 	if ok := anchoredIdentifierRegexp.MatchString(s); ok {
 		return nil, fmt.Errorf("invalid repository name (%s), cannot specify 64-byte hexadecimal strings", s)
 	}
-	domain, remainder := splitDockerDomain(s)
+	domain, remainder := splitDomain(s)
+	if domain == legacyDefaultDomain {
+		domain = defaultDomain
+	}
 	var remoteName string
 	if tagSep := strings.IndexRune(remainder, ':'); tagSep > -1 {
 		remoteName = remainder[:tagSep]
@@ -58,17 +61,6 @@ func ParseNormalizedNamed(s string) (Named, error) {
 		return nil, fmt.Errorf("reference %s has no name", ref.String())
 	}
 	return named, nil
-}
-
-// splitDockerDomain splits a repository name to domain and remotename
-// string. If no valid domain is found, then domain is "". Repository
-// name needs to be already validated before.
-func splitDockerDomain(name string) (domain, remainder string) {
-	domain, remainder = splitRepoName(name)
-	if domain == legacyDefaultDomain {
-		domain = defaultDomain
-	}
-	return
 }
 
 // familiarizeName is a no-op and returns named

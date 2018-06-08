@@ -165,7 +165,7 @@ func Path(named Named) (name string) {
 
 func splitDomain(name string) (string, string) {
 	match := anchoredNameRegexp.FindStringSubmatch(name)
-	if len(match) != 3 {
+	if len(match) != 3 || !imageHasDomain(name) {
 		return "", name
 	}
 	return match[1], match[2]
@@ -205,7 +205,7 @@ func Parse(s string) (Reference, error) {
 	var repo repository
 
 	nameMatch := anchoredNameRegexp.FindStringSubmatch(matches[1])
-	if nameMatch != nil && len(nameMatch) == 3 && repoHasDomain(nameMatch[0]) {
+	if nameMatch != nil && len(nameMatch) == 3 && imageHasDomain(nameMatch[0]) {
 		repo.domain = nameMatch[1]
 		repo.path = nameMatch[2]
 	} else {
@@ -243,7 +243,7 @@ func ParseNamed(s string) (Named, error) {
 	if err != nil {
 		return nil, err
 	}
-	if named.String() != s || !repoHasDomain(named.String()) {
+	if named.String() != s || !imageHasDomain(named.String()) {
 		return nil, ErrNameNotCanonical
 	}
 	return named, nil
@@ -432,18 +432,15 @@ func (c canonicalReference) Digest() digest.Digest {
 	return c.digest
 }
 
-// splitRepoName splits name into domain and remainder. This returns
-// "" if there is no domain. It also differs to splitDomain() as that
-// function is expecting the canonical format.
-func splitRepoName(name string) (string, string) {
+// Returns true if name includes a domain.
+func imageHasDomain(name string) bool {
 	i := strings.IndexRune(name, '/')
-	if i == -1 || (!strings.ContainsAny(name[:i], ".:") && name[:i] != "localhost") {
-		return "", name
+	switch {
+	case i == -1:
+		return false
+	case !strings.ContainsAny(name[:i], ".:") && name[:i] != "localhost":
+		return false
+	default:
+		return true
 	}
-	return name[:i], name[i+1:]
-}
-
-func repoHasDomain(name string) bool {
-	domain, _ := splitRepoName(name)
-	return domain != ""
 }
