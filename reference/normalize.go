@@ -68,9 +68,6 @@ func splitDockerDomain(name string) (domain, remainder string) {
 	if domain == legacyDefaultDomain {
 		domain = defaultDomain
 	}
-	if domain == defaultDomain && !strings.ContainsRune(remainder, '/') {
-		remainder = officialRepoName + "/" + remainder
-	}
 	return
 }
 

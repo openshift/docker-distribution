@@ -622,11 +622,6 @@ func TestParseNamed(t *testing.T) {
 			domain: "docker.io",
 			name:   "library/foo",
 		},
-		// Ambiguous case, parser will add "library/" to foo
-		{
-			input: "docker.io/foo",
-			err:   ErrNameNotCanonical,
-		},
 	}
 	for _, testcase := range testcases {
 		failf := func(format string, v ...interface{}) {

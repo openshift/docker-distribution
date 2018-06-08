@@ -200,7 +200,7 @@ func TestParseRepositoryInfo(t *testing.T) {
 		{
 			RemoteName:    "library/foo",
 			FullName:      "docker.io/library/foo",
-			AmbiguousName: "docker.io/foo",
+			AmbiguousName: "",
 			Domain:        "docker.io",
 		},
 		{
@@ -495,7 +495,7 @@ func TestNormalizedSplitHostname(t *testing.T) {
 		{
 			input:  "docker.io/foo",
 			domain: "docker.io",
-			name:   "library/foo",
+			name:   "foo",
 		},
 		{
 			input:  "docker.io/library/foo",
