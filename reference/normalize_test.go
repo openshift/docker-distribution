@@ -233,9 +233,18 @@ func TestParseRepositoryInfo(t *testing.T) {
 	}
 
 	for _, tcase := range tcases {
-		refStrings := []string{tcase.FamiliarName, tcase.FullName}
+		refStrings := []string{tcase.FullName}
 		if tcase.AmbiguousName != "" {
-			refStrings = append(refStrings, tcase.AmbiguousName)
+			if imageHasDomain(tcase.AmbiguousName) {
+				refStrings = append(refStrings, tcase.AmbiguousName)
+			} else if tcase.Domain == defaultDomain {
+				refStrings = append(refStrings, defaultDomain+"/"+tcase.AmbiguousName)
+			}
+		}
+
+		if tcase.Domain == defaultDomain {
+			// ParseNormalizedNamed() no longer adds a default domain.
+			refStrings = append(refStrings, defaultDomain+"/"+tcase.FamiliarName)
 		}
 
 		var refs []Named
@@ -248,7 +257,15 @@ func TestParseRepositoryInfo(t *testing.T) {
 		}
 
 		for _, r := range refs {
-			if expected, actual := tcase.FamiliarName, FamiliarName(r); expected != actual {
+			domain, remainder := splitDomain(FamiliarName(r))
+			var familiarName = remainder
+			if domain != "" {
+				// ParseNormalizedNamed() no longer
+				// adds a default domain so add that
+				// back.
+				familiarName = domain + "/" + remainder
+			}
+			if expected, actual := tcase.FamiliarName, familiarName; expected != actual {
 				t.Fatalf("Invalid normalized reference for %q. Expected %q, got %q", r, expected, actual)
 			}
 			if expected, actual := tcase.FullName, r.String(); expected != actual {
