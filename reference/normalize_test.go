@@ -267,7 +267,7 @@ func TestParseRepositoryInfo(t *testing.T) {
 
 func TestParseReferenceWithTagAndDigest(t *testing.T) {
 	shortRef := "busybox:latest@sha256:86e0e091d0da6bde2456dbb48306f3956bbeb2eae1b5b9a43045843f69fe4aaa"
-	ref, err := ParseNormalizedNamed(shortRef)
+	ref, err := ParseNormalizedNamed("docker.io/library/" + shortRef)
 	if err != nil {
 		t.Fatal(err)
 	}
