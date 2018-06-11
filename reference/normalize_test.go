@@ -541,12 +541,20 @@ func TestNormalizedSplitHostname(t *testing.T) {
 			t.Logf(strconv.Quote(testcase.input)+": "+format, v...)
 			t.Fail()
 		}
-
-		named, err := ParseNormalizedNamed(testcase.input)
+		input := testcase.input
+		if testcase.domain == defaultDomain {
+			if domain, _ := splitDomain(testcase.input); domain != defaultDomain {
+				input = defaultDomain + "/" + testcase.input
+			}
+		}
+		named, err := ParseNormalizedNamed(input)
 		if err != nil {
 			failf("error parsing name: %s", err)
 		}
 		domain, name := SplitHostname(named)
+		if testcase.domain == "" {
+			domain = defaultDomain
+		}
 		if domain != testcase.domain {
 			failf("unexpected domain: got %q, expected %q", domain, testcase.domain)
 		}
