@@ -165,7 +165,7 @@ func Path(named Named) (name string) {
 
 func splitDomain(name string) (string, string) {
 	match := anchoredNameRegexp.FindStringSubmatch(name)
-	if len(match) != 3 {
+	if len(match) != 3 || !imageHasDomain(name) {
 		return "", name
 	}
 	return match[1], match[2]
@@ -187,6 +187,10 @@ func SplitHostname(named Named) (string, string) {
 // If an error was encountered it is returned, along with a nil Reference.
 // NOTE: Parse will not handle short digests.
 func Parse(s string) (Reference, error) {
+	return parse(s, false)
+}
+
+func parse(s string, maybeUnqualified bool) (Reference, error) {
 	matches := ReferenceRegexp.FindStringSubmatch(s)
 	if matches == nil {
 		if s == "" {
@@ -213,6 +217,10 @@ func Parse(s string) (Reference, error) {
 		repo.path = matches[1]
 	}
 
+	if maybeUnqualified && repo.domain != "" && !imageHasDomain(repo.domain) {
+		repo.domain, repo.path = splitDomain(matches[1])
+	}
+
 	ref := reference{
 		namedRepository: repo,
 		tag:             matches[2],
@@ -233,6 +241,10 @@ func Parse(s string) (Reference, error) {
 	return r, nil
 }
 
+func parseUnqualified(s string) (Reference, error) {
+	return parse(s, true)
+}
+
 // ParseNamed parses s and returns a syntactically valid reference implementing
 // the Named interface. The reference must have a name and be in the canonical
 // form, otherwise an error is returned.
@@ -243,7 +255,8 @@ func ParseNamed(s string) (Named, error) {
 	if err != nil {
 		return nil, err
 	}
-	if named.String() != s {
+	name := named.String()
+	if name != s || !imageHasDomain(name) {
 		return nil, ErrNameNotCanonical
 	}
 	return named, nil
@@ -430,4 +443,17 @@ func (c canonicalReference) String() string {
 
 func (c canonicalReference) Digest() digest.Digest {
 	return c.digest
+}
+
+// Returns true if name includes a domain.
+func imageHasDomain(name string) bool {
+	i := strings.IndexRune(name, '/')
+	switch {
+	case i == -1:
+		return false
+	case !strings.ContainsAny(name[:i], ".:") && name[:i] != "localhost":
+		return false
+	default:
+		return true
+	}
 }
