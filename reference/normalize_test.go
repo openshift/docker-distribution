@@ -2,6 +2,7 @@ package reference
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/docker/distribution/digestset"
@@ -431,10 +432,19 @@ func TestParseAnyReference(t *testing.T) {
 	}
 
 	for _, tcase := range tcases {
+		input := tcase.Reference
+		if !imageHasDomain(tcase.Reference) {
+			if strings.HasPrefix(tcase.Equivalent, defaultDomain+"/"+officialRepoName) {
+				input = defaultDomain + "/" + officialRepoName + "/" + input
+			} else if strings.HasPrefix(tcase.Equivalent, defaultDomain) {
+				input = defaultDomain + "/" + input
+			}
+		}
+
 		var ref Reference
 		var err error
 		if len(tcase.Digests) == 0 {
-			ref, err = ParseAnyReference(tcase.Reference)
+			ref, err = ParseAnyReference(input)
 		} else {
 			ds := digestset.NewSet()
 			for _, dgst := range tcase.Digests {
@@ -442,7 +452,7 @@ func TestParseAnyReference(t *testing.T) {
 					t.Fatalf("Error adding digest %s: %v", dgst.String(), err)
 				}
 			}
-			ref, err = ParseAnyReferenceWithSet(tcase.Reference, ds)
+			ref, err = ParseAnyReferenceWithSet(input, ds)
 		}
 		if err != nil {
 			t.Fatalf("Error parsing reference %s: %v", tcase.Reference, err)
