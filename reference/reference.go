@@ -165,7 +165,7 @@ func Path(named Named) (name string) {
 
 func splitDomain(name string) (string, string) {
 	match := anchoredNameRegexp.FindStringSubmatch(name)
-	if len(match) != 3 {
+	if len(match) != 3 || !imageHasDomain(name) {
 		return "", name
 	}
 	return match[1], match[2]
@@ -205,7 +205,7 @@ func Parse(s string) (Reference, error) {
 	var repo repository
 
 	nameMatch := anchoredNameRegexp.FindStringSubmatch(matches[1])
-	if nameMatch != nil && len(nameMatch) == 3 {
+	if nameMatch != nil && len(nameMatch) == 3 && imageHasDomain(nameMatch[0]) {
 		repo.domain = nameMatch[1]
 		repo.path = nameMatch[2]
 	} else {
@@ -243,7 +243,7 @@ func ParseNamed(s string) (Named, error) {
 	if err != nil {
 		return nil, err
 	}
-	if named.String() != s {
+	if named.String() != s || !imageHasDomain(named.String()) {
 		return nil, ErrNameNotCanonical
 	}
 	return named, nil
@@ -430,4 +430,17 @@ func (c canonicalReference) String() string {
 
 func (c canonicalReference) Digest() digest.Digest {
 	return c.digest
+}
+
+// Returns true if name includes a domain.
+func imageHasDomain(name string) bool {
+	i := strings.IndexRune(name, '/')
+	switch {
+	case i == -1:
+		return false
+	case !strings.ContainsAny(name[:i], ".:") && name[:i] != "localhost":
+		return false
+	default:
+		return true
+	}
 }
