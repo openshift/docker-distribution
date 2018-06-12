@@ -2,6 +2,7 @@ package reference
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/docker/distribution/digestset"
@@ -232,9 +233,18 @@ func TestParseRepositoryInfo(t *testing.T) {
 	}
 
 	for _, tcase := range tcases {
-		refStrings := []string{tcase.FamiliarName, tcase.FullName}
+		refStrings := []string{tcase.FullName}
 		if tcase.AmbiguousName != "" {
-			refStrings = append(refStrings, tcase.AmbiguousName)
+			if imageHasDomain(tcase.AmbiguousName) {
+				refStrings = append(refStrings, tcase.AmbiguousName)
+			} else if tcase.Domain == defaultDomain {
+				refStrings = append(refStrings, defaultDomain+"/"+tcase.AmbiguousName)
+			}
+		}
+
+		if tcase.Domain == defaultDomain {
+			// ParseNormalizedNamed() no longer adds a default domain.
+			refStrings = append(refStrings, defaultDomain+"/"+tcase.FamiliarName)
 		}
 
 		var refs []Named
@@ -247,7 +257,15 @@ func TestParseRepositoryInfo(t *testing.T) {
 		}
 
 		for _, r := range refs {
-			if expected, actual := tcase.FamiliarName, FamiliarName(r); expected != actual {
+			domain, remainder := splitDomain(FamiliarName(r))
+			var familiarName = remainder
+			if domain != "" {
+				// ParseNormalizedNamed() no longer
+				// adds a default domain so add that
+				// back.
+				familiarName = domain + "/" + remainder
+			}
+			if expected, actual := tcase.FamiliarName, familiarName; expected != actual {
 				t.Fatalf("Invalid normalized reference for %q. Expected %q, got %q", r, expected, actual)
 			}
 			if expected, actual := tcase.FullName, r.String(); expected != actual {
@@ -266,7 +284,7 @@ func TestParseRepositoryInfo(t *testing.T) {
 
 func TestParseReferenceWithTagAndDigest(t *testing.T) {
 	shortRef := "busybox:latest@sha256:86e0e091d0da6bde2456dbb48306f3956bbeb2eae1b5b9a43045843f69fe4aaa"
-	ref, err := ParseNormalizedNamed(shortRef)
+	ref, err := ParseNormalizedNamed("docker.io/library/" + shortRef)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,10 +449,19 @@ func TestParseAnyReference(t *testing.T) {
 	}
 
 	for _, tcase := range tcases {
+		input := tcase.Reference
+		if !imageHasDomain(tcase.Reference) {
+			if strings.HasPrefix(tcase.Equivalent, defaultDomain+"/"+officialRepoName) {
+				input = defaultDomain + "/" + officialRepoName + "/" + input
+			} else if strings.HasPrefix(tcase.Equivalent, defaultDomain) {
+				input = defaultDomain + "/" + input
+			}
+		}
+
 		var ref Reference
 		var err error
 		if len(tcase.Digests) == 0 {
-			ref, err = ParseAnyReference(tcase.Reference)
+			ref, err = ParseAnyReference(input)
 		} else {
 			ds := digestset.NewSet()
 			for _, dgst := range tcase.Digests {
@@ -442,7 +469,7 @@ func TestParseAnyReference(t *testing.T) {
 					t.Fatalf("Error adding digest %s: %v", dgst.String(), err)
 				}
 			}
-			ref, err = ParseAnyReferenceWithSet(tcase.Reference, ds)
+			ref, err = ParseAnyReferenceWithSet(input, ds)
 		}
 		if err != nil {
 			t.Fatalf("Error parsing reference %s: %v", tcase.Reference, err)
@@ -531,12 +558,20 @@ func TestNormalizedSplitHostname(t *testing.T) {
 			t.Logf(strconv.Quote(testcase.input)+": "+format, v...)
 			t.Fail()
 		}
-
-		named, err := ParseNormalizedNamed(testcase.input)
+		input := testcase.input
+		if testcase.domain == defaultDomain {
+			if domain, _ := splitDomain(testcase.input); domain != defaultDomain {
+				input = defaultDomain + "/" + testcase.input
+			}
+		}
+		named, err := ParseNormalizedNamed(input)
 		if err != nil {
 			failf("error parsing name: %s", err)
 		}
 		domain, name := SplitHostname(named)
+		if testcase.domain == "" {
+			domain = defaultDomain
+		}
 		if domain != testcase.domain {
 			failf("unexpected domain: got %q, expected %q", domain, testcase.domain)
 		}
