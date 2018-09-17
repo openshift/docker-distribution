@@ -1,20 +1,23 @@
-package digest
+package digestset
 
 import (
 	"crypto/sha256"
+	_ "crypto/sha512"
 	"encoding/binary"
 	"math/rand"
 	"testing"
+
+	digest "github.com/opencontainers/go-digest"
 )
 
-func assertEqualDigests(t *testing.T, d1, d2 Digest) {
+func assertEqualDigests(t *testing.T, d1, d2 digest.Digest) {
 	if d1 != d2 {
 		t.Fatalf("Digests do not match:\n\tActual: %s\n\tExpected: %s", d1, d2)
 	}
 }
 
 func TestLookup(t *testing.T) {
-	digests := []Digest{
+	digests := []digest.Digest{
 		"sha256:1234511111111111111111111111111111111111111111111111111111111111",
 		"sha256:1234111111111111111111111111111111111111111111111111111111111111",
 		"sha256:1234611111111111111111111111111111111111111111111111111111111111",
@@ -38,7 +41,7 @@ func TestLookup(t *testing.T) {
 	}
 	assertEqualDigests(t, dgst, digests[3])
 
-	dgst, err = dset.Lookup("1234")
+	_, err = dset.Lookup("1234")
 	if err == nil {
 		t.Fatal("Expected ambiguous error looking up: 1234")
 	}
@@ -46,15 +49,15 @@ func TestLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dgst, err = dset.Lookup("9876")
+	_, err = dset.Lookup("9876")
 	if err == nil {
-		t.Fatal("Expected ambiguous error looking up: 9876")
+		t.Fatal("Expected not found error looking up: 9876")
 	}
 	if err != ErrDigestNotFound {
 		t.Fatal(err)
 	}
 
-	dgst, err = dset.Lookup("sha256:1234")
+	_, err = dset.Lookup("sha256:1234")
 	if err == nil {
 		t.Fatal("Expected ambiguous error looking up: sha256:1234")
 	}
@@ -88,7 +91,7 @@ func TestLookup(t *testing.T) {
 }
 
 func TestAddDuplication(t *testing.T) {
-	digests := []Digest{
+	digests := []digest.Digest{
 		"sha256:1234111111111111111111111111111111111111111111111111111111111111",
 		"sha256:1234511111111111111111111111111111111111111111111111111111111111",
 		"sha256:1234611111111111111111111111111111111111111111111111111111111111",
@@ -110,20 +113,20 @@ func TestAddDuplication(t *testing.T) {
 		t.Fatal("Invalid dset size")
 	}
 
-	if err := dset.Add(Digest("sha256:1234511111111111111111111111111111111111111111111111111111111111")); err != nil {
+	if err := dset.Add(digest.Digest("sha256:1234511111111111111111111111111111111111111111111111111111111111")); err != nil {
 		t.Fatal(err)
 	}
 
 	if len(dset.entries) != 8 {
-		t.Fatal("Duplicate digest insert allowed")
+		t.Fatal("Duplicate digest insert should not increase entries size")
 	}
 
-	if err := dset.Add(Digest("sha384:123451111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111")); err != nil {
+	if err := dset.Add(digest.Digest("sha384:123451111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111")); err != nil {
 		t.Fatal(err)
 	}
 
 	if len(dset.entries) != 9 {
-		t.Fatal("Insert with different algorithm not allowed")
+		t.Fatal("Insert with different algorithm should be allowed")
 	}
 }
 
@@ -170,7 +173,7 @@ func TestAll(t *testing.T) {
 		}
 	}
 
-	all := map[Digest]struct{}{}
+	all := map[digest.Digest]struct{}{}
 	for _, dgst := range dset.All() {
 		all[dgst] = struct{}{}
 	}
@@ -194,7 +197,7 @@ func assertEqualShort(t *testing.T, actual, expected string) {
 }
 
 func TestShortCodeTable(t *testing.T) {
-	digests := []Digest{
+	digests := []digest.Digest{
 		"sha256:1234111111111111111111111111111111111111111111111111111111111111",
 		"sha256:1234511111111111111111111111111111111111111111111111111111111111",
 		"sha256:1234611111111111111111111111111111111111111111111111111111111111",
@@ -227,15 +230,15 @@ func TestShortCodeTable(t *testing.T) {
 	assertEqualShort(t, dump[digests[7]], "653")
 }
 
-func createDigests(count int) ([]Digest, error) {
+func createDigests(count int) ([]digest.Digest, error) {
 	r := rand.New(rand.NewSource(25823))
-	digests := make([]Digest, count)
+	digests := make([]digest.Digest, count)
 	for i := range digests {
 		h := sha256.New()
 		if err := binary.Write(h, binary.BigEndian, r.Int63()); err != nil {
 			return nil, err
 		}
-		digests[i] = NewDigest("sha256", h)
+		digests[i] = digest.NewDigest("sha256", h)
 	}
 	return digests, nil
 }
