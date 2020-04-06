@@ -39,6 +39,7 @@ func init() {
 	regionEndpoint := os.Getenv("REGION_ENDPOINT")
 	sessionToken := os.Getenv("AWS_SESSION_TOKEN")
 	useDualStack := os.Getenv("S3_USE_DUALSTACK")
+	virtualHostedStyle := os.Getenv("S3_VIRTUAL_HOSTED_STYLE")
 	if err != nil {
 		panic(err)
 	}
@@ -85,6 +86,14 @@ func init() {
 			}
 		}
 
+		virtualHostedStyleBool := true
+		if virtualHostedStyle != "" {
+			virtualHostedStyleBool, err = strconv.ParseBool(virtualHostedStyle)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		parameters := DriverParameters{
 			accessKey,
 			secretKey,
@@ -106,6 +115,7 @@ func init() {
 			objectACL,
 			sessionToken,
 			useDualStackBool,
+			virtualHostedStyleBool,
 		}
 
 		return New(parameters)
