@@ -33,22 +33,23 @@ var (
 
 func init() {
 	var (
-		accessKey        = os.Getenv("AWS_ACCESS_KEY")
-		secretKey        = os.Getenv("AWS_SECRET_KEY")
-		bucket           = os.Getenv("S3_BUCKET")
-		encrypt          = os.Getenv("S3_ENCRYPT")
-		keyID            = os.Getenv("S3_KEY_ID")
-		secure           = os.Getenv("S3_SECURE")
-		skipVerify       = os.Getenv("S3_SKIP_VERIFY")
-		v4Auth           = os.Getenv("S3_V4_AUTH")
-		region           = os.Getenv("AWS_REGION")
-		objectACL        = os.Getenv("S3_OBJECT_ACL")
-		regionEndpoint   = os.Getenv("REGION_ENDPOINT")
-		forcePathStyle   = os.Getenv("AWS_S3_FORCE_PATH_STYLE")
-		sessionToken     = os.Getenv("AWS_SESSION_TOKEN")
-		useDualStack     = os.Getenv("S3_USE_DUALSTACK")
-		combineSmallPart = os.Getenv("MULTIPART_COMBINE_SMALL_PART")
-		accelerate       = os.Getenv("S3_ACCELERATE")
+		accessKey          = os.Getenv("AWS_ACCESS_KEY")
+		secretKey          = os.Getenv("AWS_SECRET_KEY")
+		bucket             = os.Getenv("S3_BUCKET")
+		encrypt            = os.Getenv("S3_ENCRYPT")
+		keyID              = os.Getenv("S3_KEY_ID")
+		secure             = os.Getenv("S3_SECURE")
+		skipVerify         = os.Getenv("S3_SKIP_VERIFY")
+		v4Auth             = os.Getenv("S3_V4_AUTH")
+		region             = os.Getenv("AWS_REGION")
+		objectACL          = os.Getenv("S3_OBJECT_ACL")
+		regionEndpoint     = os.Getenv("REGION_ENDPOINT")
+		forcePathStyle     = os.Getenv("AWS_S3_FORCE_PATH_STYLE")
+		sessionToken       = os.Getenv("AWS_SESSION_TOKEN")
+		useDualStack       = os.Getenv("S3_USE_DUALSTACK")
+		combineSmallPart   = os.Getenv("MULTIPART_COMBINE_SMALL_PART")
+		accelerate         = os.Getenv("S3_ACCELERATE")
+		virtualHostedStyle = os.Getenv("S3_VIRTUAL_HOSTED_STYLE")
 	)
 
 	root, err := os.MkdirTemp("", "driver-")
@@ -118,6 +119,14 @@ func init() {
 			}
 		}
 
+		virtualHostedStyleBool := true
+		if virtualHostedStyle != "" {
+			virtualHostedStyleBool, err = strconv.ParseBool(virtualHostedStyle)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		parameters := DriverParameters{
 			accessKey,
 			secretKey,
@@ -142,6 +151,7 @@ func init() {
 			sessionToken,
 			useDualStackBool,
 			accelerateBool,
+			virtualHostedStyleBool,
 		}
 
 		return New(parameters)

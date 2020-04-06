@@ -164,6 +164,7 @@ type driver struct {
 	RootDirectory               string
 	StorageClass                string
 	ObjectACL                   string
+	VirtualHostedStyle          bool
 }
 
 type baseEmbed struct {
@@ -416,6 +417,23 @@ func FromParameters(parameters map[string]interface{}) (*Driver, error) {
 		return nil, fmt.Errorf("the multipartcombinesmallpart parameter should be a boolean")
 	}
 
+	virtualHostedStyleBool := false
+	virtualHostedStyle := parameters["virtualhostedstyle"]
+	switch virtualHostedStyle := virtualHostedStyle.(type) {
+	case string:
+		b, err := strconv.ParseBool(virtualHostedStyle)
+		if err != nil {
+			return nil, fmt.Errorf("the virtualHostedStyle parameter should be a boolean")
+		}
+		virtualHostedStyleBool = b
+	case bool:
+		virtualHostedStyleBool = virtualHostedStyle
+	case nil:
+		// do nothing
+	default:
+		return nil, fmt.Errorf("the virtualHostedStyle parameter should be a boolean")
+	}
+
 	sessionToken := ""
 
 	accelerateBool := false
@@ -459,6 +477,7 @@ func FromParameters(parameters map[string]interface{}) (*Driver, error) {
 		fmt.Sprint(sessionToken),
 		useDualStackBool,
 		accelerateBool,
+		virtualHostedStyleBool,
 	}
 
 	return New(params)
@@ -514,6 +533,9 @@ func New(params DriverParameters) (*Driver, error) {
 	}
 
 	if params.RegionEndpoint != "" {
+		if !params.VirtualHostedStyle {
+			awsConfig.WithS3ForcePathStyle(true)
+		}
 		awsConfig.WithEndpoint(params.RegionEndpoint)
 		awsConfig.WithS3ForcePathStyle(params.ForcePathStyle)
 	}
