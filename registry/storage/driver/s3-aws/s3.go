@@ -104,6 +104,7 @@ type DriverParameters struct {
 	ObjectACL                   string
 	SessionToken                string
 	UseDualStack                bool
+	VirtualHostedStyle          bool
 }
 
 func init() {
