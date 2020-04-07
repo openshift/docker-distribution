@@ -164,7 +164,6 @@ type driver struct {
 	RootDirectory               string
 	StorageClass                string
 	ObjectACL                   string
-	VirtualHostedStyle          bool
 }
 
 type baseEmbed struct {
