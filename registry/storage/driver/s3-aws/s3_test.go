@@ -40,6 +40,7 @@ func init() {
 	sessionToken := os.Getenv("AWS_SESSION_TOKEN")
 	useDualStack := os.Getenv("S3_USE_DUALSTACK")
 	virtualHostedStyle := os.Getenv("S3_VIRTUAL_HOSTED_STYLE")
+	credentialsConfigPath := os.Getenv("AWS_SHARED_CREDENTIALS_FILE")
 	if err != nil {
 		panic(err)
 	}
@@ -116,6 +117,7 @@ func init() {
 			sessionToken,
 			useDualStackBool,
 			virtualHostedStyleBool,
+			credentialsConfigPath,
 		}
 
 		return New(parameters)
