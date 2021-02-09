@@ -118,6 +118,7 @@ func init() {
 			useDualStackBool,
 			virtualHostedStyleBool,
 			credentialsConfigPath,
+			aws.LogOff,
 		}
 
 		return New(parameters)
