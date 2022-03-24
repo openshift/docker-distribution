@@ -5,12 +5,9 @@
 package google
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/user"
@@ -19,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/internal"
 )
 
 type sdkCredentials struct {
@@ -77,7 +76,7 @@ func NewSDKConfig(account string) (*SDKConfig, error) {
 			return nil, fmt.Errorf("oauth2/google: failed to load SDK properties: %v", err)
 		}
 		defer f.Close()
-		ini, err := parseINI(f)
+		ini, err := internal.ParseINI(f)
 		if err != nil {
 			return nil, fmt.Errorf("oauth2/google: failed to parse SDK properties %q: %v", propertiesPath, err)
 		}
@@ -147,34 +146,6 @@ func (c *SDKConfig) Scopes() []string {
 	return c.conf.Scopes
 }
 
-func parseINI(ini io.Reader) (map[string]map[string]string, error) {
-	result := map[string]map[string]string{
-		"": {}, // root section
-	}
-	scanner := bufio.NewScanner(ini)
-	currentSection := ""
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, ";") {
-			// comment.
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			currentSection = strings.TrimSpace(line[1 : len(line)-1])
-			result[currentSection] = map[string]string{}
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 && parts[0] != "" {
-			result[currentSection][strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error scanning ini: %v", err)
-	}
-	return result, nil
-}
-
 // sdkConfigPath tries to guess where the gcloud config is located.
 // It can be overridden during tests.
 var sdkConfigPath = func() (string, error) {
@@ -189,13 +160,9 @@ var sdkConfigPath = func() (string, error) {
 }
 
 func guessUnixHomeDir() string {
-	// Prefer $HOME over user.Current due to glibc bug: golang.org/issue/13470
-	if v := os.Getenv("HOME"); v != "" {
-		return v
+	usr, err := user.Current()
+	if err == nil {
+		return usr.HomeDir
 	}
-	// Else, fall back to user.Current:
-	if u, err := user.Current(); err == nil {
-		return u.HomeDir
-	}
-	return ""
+	return os.Getenv("HOME")
 }
