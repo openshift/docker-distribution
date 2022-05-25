@@ -156,23 +156,23 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 	}
 
 	var ts oauth2.TokenSource
-	jwtConf := new(jwt.Config)
 	var err error
 	var gcs *storage.Client
+	var creds *google.Credentials
 	if keyfile, ok := parameters["keyfile"]; ok {
 		jsonKey, err := os.ReadFile(fmt.Sprint(keyfile))
 		if err != nil {
 			return nil, err
 		}
-		jwtConf, err = google.JWTConfigFromJSON(jsonKey, storage.ScopeFullControl)
+		creds, err = google.CredentialsFromJSON(context.Background(), jsonKey, storage.ScopeFullControl)
 		if err != nil {
 			return nil, err
 		}
-		ts = jwtConf.TokenSource(ctx)
 		gcs, err = storage.NewClient(ctx, option.WithCredentialsFile(fmt.Sprint(keyfile)))
 		if err != nil {
 			return nil, err
 		}
+		ts = creds.TokenSource
 	} else if credentials, ok := parameters["credentials"]; ok {
 		credentialMap, ok := credentials.(map[interface{}]interface{})
 		if !ok {
@@ -193,15 +193,15 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 			return nil, fmt.Errorf("Failed to marshal gcs credentials to json")
 		}
 
-		jwtConf, err = google.JWTConfigFromJSON(data, storage.ScopeFullControl)
+		creds, err = google.CredentialsFromJSON(context.Background(), data, storage.ScopeFullControl)
 		if err != nil {
 			return nil, err
 		}
-		ts = jwtConf.TokenSource(ctx)
 		gcs, err = storage.NewClient(ctx, option.WithCredentialsJSON(data))
 		if err != nil {
 			return nil, err
 		}
+		ts = creds.TokenSource
 	} else {
 		var err error
 		ts, err = google.DefaultTokenSource(ctx, storage.ScopeFullControl)
@@ -221,9 +221,9 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 	params := driverParameters{
 		bucket:         fmt.Sprint(bucket),
 		rootDirectory:  fmt.Sprint(rootDirectory),
-		email:          jwtConf.Email,
-		privateKey:     jwtConf.PrivateKey,
 		client:         oauth2.NewClient(ctx, ts),
+		email:          getEmailFromCredentialsJSON(creds.JSON),
+		privateKey:     getPrivateKeyFromCredentialsJSON(creds.JSON),
 		chunkSize:      chunkSize,
 		maxConcurrency: maxConcurrency,
 		gcs:            gcs,
@@ -936,4 +936,37 @@ func (d *driver) pathToDirKey(path string) string {
 
 func (d *driver) keyToPath(key string) string {
 	return "/" + strings.Trim(strings.TrimPrefix(key, d.rootDirectory), "/")
+}
+
+func getEmailFromCredentialsJSON(JSON []byte) string {
+	var credsFile struct {
+		Email string `json:"client_email"`
+	}
+	err := json.Unmarshal(JSON, &credsFile)
+	if err == nil && credsFile.Email != "" {
+		return credsFile.Email
+	}
+	return ""
+}
+
+func getPrivateKeyFromCredentialsJSON(JSON []byte) []byte {
+	var credsFile struct {
+		PrivateKey string `json:"private_key"`
+	}
+	err := json.Unmarshal(JSON, &credsFile)
+	if err == nil && credsFile.PrivateKey != "" {
+		return []byte(credsFile.PrivateKey)
+	}
+	return nil
+}
+
+func getTypeFromCredentialsJSON(JSON []byte) string {
+	var credsFile struct {
+		Type string `json:"type"`
+	}
+	err := json.Unmarshal(JSON, &credsFile)
+	if err == nil && credsFile.Type != "" {
+		return credsFile.Type
+	}
+	return ""
 }
