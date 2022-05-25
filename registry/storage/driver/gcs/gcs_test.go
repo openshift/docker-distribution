@@ -3,6 +3,8 @@ package gcs
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -19,6 +21,7 @@ import (
 var (
 	gcsDriverConstructor func(rootDirectory string) (storagedriver.StorageDriver, error)
 	skipCheck            func(tb testing.TB)
+	credentialsType      string
 )
 
 func init() {
@@ -44,24 +47,14 @@ func init() {
 		var email string
 		var privateKey []byte
 
-		ts, err = google.DefaultTokenSource(dcontext.Background(), storage.ScopeFullControl)
+		creds, err := google.CredentialsFromJSON(context.Background(), jsonKey, storage.ScopeFullControl)
 		if err != nil {
-			// Assume that the file contents are within the environment variable since it exists
-			// but does not contain a valid file path
-			jwtConfig, err := google.JWTConfigFromJSON(jsonKey, storage.ScopeFullControl)
-			if err != nil {
-				panic(fmt.Sprintf("Error reading JWT config : %s", err))
-			}
-			email = jwtConfig.Email
-			privateKey = jwtConfig.PrivateKey
-			if len(privateKey) == 0 {
-				panic("Error reading JWT config : missing private_key property")
-			}
-			if email == "" {
-				panic("Error reading JWT config : missing client_email property")
-			}
-			ts = jwtConfig.TokenSource(dcontext.Background())
+			panic(fmt.Sprintf("Error reading credentials json file : %s", err))
 		}
+		credentialsType = getTypeFromCredentialsJSON(creds.JSON)
+		email = getEmailFromCredentialsJSON(creds.JSON)
+		privateKey = getPrivateKeyFromCredentialsJSON(creds.JSON)
+		ts = creds.TokenSource
 
 		gcs, err := storage.NewClient(dcontext.Background(), option.WithCredentialsJSON(jsonKey))
 		if err != nil {
@@ -304,5 +297,61 @@ func TestMoveDirectory(t *testing.T) {
 	err = driver.Move(ctx, "/parent/dir", "/parent/other")
 	if err == nil {
 		t.Fatal("Moving directory /parent/dir /parent/other should have return a non-nil error")
+	}
+}
+
+// Test getting signed URL for a stored object
+func TestURLFor(t *testing.T) {
+	skipCheck(t)
+
+	validRoot := t.TempDir()
+
+	driver, err := gcsDriverConstructor(validRoot)
+	if err != nil {
+		t.Fatalf("unexpected error creating rooted driver: %v", err)
+	}
+
+	filename := "/test"
+	ctx := dcontext.Background()
+
+	contents := make([]byte, defaultChunkSize)
+	writer, err := driver.Writer(ctx, filename, false)
+	defer driver.Delete(ctx, filename)
+	if err != nil {
+		t.Fatalf("driver.Writer: unexpected error: %v", err)
+	}
+	_, err = writer.Write(contents)
+	if err != nil {
+		t.Fatalf("writer.Write: unexpected error: %v", err)
+	}
+	err = writer.Commit(ctx)
+	if err != nil {
+		t.Fatalf("writer.Commit: unexpected error: %v", err)
+	}
+	err = writer.Close()
+	if err != nil {
+		t.Fatalf("writer.Close: unexpected error: %v", err)
+	}
+	if writer.Size() != int64(len(contents)) {
+		t.Fatalf("writer.Size: %d != %d", writer.Size(), len(contents))
+	}
+
+	// fetch and verify if signed URL for the stored object is not empty
+	signedURL, err := driver.RedirectURL(httptest.NewRequest(http.MethodGet, filename, nil), filename)
+
+	switch credentialsType {
+	case "service_account":
+		if err != nil {
+			t.Fatalf("driver.RedirectURL: unexpected error: %v", err)
+		}
+		if len(signedURL) == 0 {
+			t.Fatalf("signed URL is empty")
+		}
+	case "external_account":
+		if err == nil {
+			t.Fatalf("driver.RedirectURL: expected error: %v", storagedriver.ErrUnsupportedMethod{})
+		}
+	default:
+		t.Fatalf("driver.RedirectURL: unexpected credentials type")
 	}
 }

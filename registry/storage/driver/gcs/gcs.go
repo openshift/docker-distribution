@@ -37,7 +37,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"golang.org/x/oauth2/jwt"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -154,20 +153,20 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 	}
 
 	var ts oauth2.TokenSource
-	jwtConf := new(jwt.Config)
 	var err error
 	var gcs *storage.Client
 	var options []option.ClientOption
+	var creds *google.Credentials
 	if keyfile, ok := parameters["keyfile"]; ok {
 		jsonKey, err := os.ReadFile(fmt.Sprint(keyfile))
 		if err != nil {
 			return nil, err
 		}
-		jwtConf, err = google.JWTConfigFromJSON(jsonKey, storage.ScopeFullControl)
+		creds, err = google.CredentialsFromJSON(context.Background(), jsonKey, storage.ScopeFullControl)
 		if err != nil {
 			return nil, err
 		}
-		ts = jwtConf.TokenSource(ctx)
+		ts = creds.TokenSource
 		options = append(options, option.WithCredentialsFile(fmt.Sprint(keyfile)))
 	} else if credentials, ok := parameters["credentials"]; ok {
 		credentialMap, ok := credentials.(map[any]any)
@@ -189,11 +188,11 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 			return nil, fmt.Errorf("failed to marshal gcs credentials to json")
 		}
 
-		jwtConf, err = google.JWTConfigFromJSON(data, storage.ScopeFullControl)
+		creds, err = google.CredentialsFromJSON(context.Background(), data, storage.ScopeFullControl)
 		if err != nil {
 			return nil, err
 		}
-		ts = jwtConf.TokenSource(ctx)
+		ts = creds.TokenSource
 		options = append(options, option.WithCredentialsJSON(data))
 	} else {
 		var err error
@@ -221,13 +220,17 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 	if err != nil {
 		return nil, fmt.Errorf("maxconcurrency config error: %s", err)
 	}
+	var credsJSON []byte
+	if creds != nil {
+		credsJSON = creds.JSON
+	}
 
 	params := driverParameters{
 		bucket:         fmt.Sprint(bucket),
 		rootDirectory:  fmt.Sprint(rootDirectory),
-		email:          jwtConf.Email,
-		privateKey:     jwtConf.PrivateKey,
 		client:         oauth2.NewClient(ctx, ts),
+		email:          getEmailFromCredentialsJSON(credsJSON),
+		privateKey:     getPrivateKeyFromCredentialsJSON(credsJSON),
 		chunkSize:      chunkSize,
 		maxConcurrency: maxConcurrency,
 		gcs:            gcs,
@@ -899,4 +902,37 @@ func (d *driver) pathToDirKey(path string) string {
 
 func (d *driver) keyToPath(key string) string {
 	return "/" + strings.Trim(strings.TrimPrefix(key, d.rootDirectory), "/")
+}
+
+func getEmailFromCredentialsJSON(JSON []byte) string {
+	var credsFile struct {
+		Email string `json:"client_email"`
+	}
+	err := json.Unmarshal(JSON, &credsFile)
+	if err == nil && credsFile.Email != "" {
+		return credsFile.Email
+	}
+	return ""
+}
+
+func getPrivateKeyFromCredentialsJSON(JSON []byte) []byte {
+	var credsFile struct {
+		PrivateKey string `json:"private_key"`
+	}
+	err := json.Unmarshal(JSON, &credsFile)
+	if err == nil && credsFile.PrivateKey != "" {
+		return []byte(credsFile.PrivateKey)
+	}
+	return nil
+}
+
+func getTypeFromCredentialsJSON(JSON []byte) string {
+	var credsFile struct {
+		Type string `json:"type"`
+	}
+	err := json.Unmarshal(JSON, &credsFile)
+	if err == nil && credsFile.Type != "" {
+		return credsFile.Type
+	}
+	return ""
 }
