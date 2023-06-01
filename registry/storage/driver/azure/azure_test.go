@@ -1,6 +1,7 @@
 package azure
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -19,6 +20,8 @@ const (
 	envRootDirectory = "AZURE_ROOT_DIRECTORY"
 )
 
+var azureDriverConstructor func() (storagedriver.StorageDriver, error)
+
 // Hook up gocheck into the "go test" runner.
 func Test(t *testing.T) { check.TestingT(t) }
 
@@ -36,10 +39,10 @@ func init() {
 		value     *string
 		missingOk bool
 	}{
-		{envAccountName, &accountName, false},
-		{envAccountKey, &accountKey, false},
-		{envContainer, &container, false},
-		{envRealm, &realm, false},
+		{envAccountName, &accountName, true},
+		{envAccountKey, &accountKey, true},
+		{envContainer, &container, true},
+		{envRealm, &realm, true},
 		{envRootDirectory, &rootDirectory, true},
 	}
 
@@ -51,7 +54,7 @@ func init() {
 		}
 	}
 
-	azureDriverConstructor := func() (storagedriver.StorageDriver, error) {
+	azureDriverConstructor = func() (storagedriver.StorageDriver, error) {
 		parameters := map[string]interface{}{
 			"container":     container,
 			"accountname":   accountName,
@@ -75,6 +78,56 @@ func init() {
 	}
 
 	testsuites.RegisterSuite(azureDriverConstructor, skipCheck)
+}
+
+func TestCommitAfterMove(t *testing.T) {
+	driver, err := azureDriverConstructor()
+	if err != nil {
+		t.Fatalf("unexpected error creating azure driver: %v", err)
+	}
+
+	contents := "test foo bar"
+	sourcePath := "/source/file"
+	destPath := "/dest/file"
+	ctx := context.Background()
+
+	defer driver.Delete(ctx, sourcePath)
+	defer driver.Delete(ctx, destPath)
+
+	writer, err := driver.Writer(ctx, sourcePath, false)
+	if err != nil {
+		t.Fatalf("unexpected error from driver.Writer: %v", err)
+	}
+
+	_, err = writer.Write([]byte(contents))
+	if err != nil {
+		t.Fatalf("writer.Write: unexpected error: %v", err)
+	}
+
+	err = writer.Commit()
+	if err != nil {
+		t.Fatalf("writer.Commit: unexpected error: %v", err)
+	}
+
+	err = writer.Close()
+	if err != nil {
+		t.Fatalf("writer.Close: unexpected error: %v", err)
+	}
+
+	_, err = driver.GetContent(ctx, sourcePath)
+	if err != nil {
+		t.Fatalf("driver.GetContent(sourcePath): unexpected error: %v", err)
+	}
+
+	err = driver.Move(ctx, sourcePath, destPath)
+	if err != nil {
+		t.Fatalf("driver.Move: unexpected error: %v", err)
+	}
+
+	_, err = driver.GetContent(ctx, destPath)
+	if err != nil {
+		t.Fatalf("GetContent(destPath): unexpected error: %v", err)
+	}
 }
 
 func TestParamParsing(t *testing.T) {
