@@ -282,12 +282,30 @@ func (d *driver) Move(ctx context.Context, sourcePath string, destPath string) e
 		return err
 	}
 	destBlobRef := d.client.NewBlockBlobClient(d.blobName(destPath))
-	_, err = destBlobRef.CopyFromURL(ctx, sourceBlobURL, nil)
+	resp, err := destBlobRef.StartCopyFromURL(ctx, sourceBlobURL, nil)
 	if err != nil {
 		if is404(err) {
 			return storagedriver.PathNotFoundError{Path: sourcePath}
 		}
 		return err
+	}
+	copyStatus := *resp.CopyStatus
+	for copyStatus == blob.CopyStatusTypePending {
+		props, err := destBlobRef.GetProperties(ctx, nil)
+		if err != nil {
+			return err
+		}
+		copyStatus = *props.CopyStatus
+		if copyStatus == blob.CopyStatusTypeAborted || copyStatus == blob.CopyStatusTypeFailed {
+			if props.CopyStatusDescription != nil {
+				return fmt.Errorf("failed to move blob: %s", *props.CopyStatusDescription)
+			}
+			return fmt.Errorf("failed to move blob with copy id %s", *props.CopyID)
+		}
+
+		if copyStatus == blob.CopyStatusTypePending {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
 	_, err = d.client.NewBlobClient(d.blobName(sourcePath)).Delete(ctx, nil)

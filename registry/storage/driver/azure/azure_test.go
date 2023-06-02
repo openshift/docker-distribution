@@ -3,6 +3,7 @@ package azure
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"testing"
@@ -80,13 +81,23 @@ func init() {
 	testsuites.RegisterSuite(azureDriverConstructor, skipCheck)
 }
 
+var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func randStringRunes(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
+}
+
 func TestCommitAfterMove(t *testing.T) {
 	driver, err := azureDriverConstructor()
 	if err != nil {
 		t.Fatalf("unexpected error creating azure driver: %v", err)
 	}
 
-	contents := "test foo bar"
+	contents := randStringRunes(4 * 1024 * 1024)
 	sourcePath := "/source/file"
 	destPath := "/dest/file"
 	ctx := context.Background()
