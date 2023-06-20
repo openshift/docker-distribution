@@ -391,6 +391,9 @@ func (app *App) RegisterHealthChecks(healthRegistries ...*health.Registry) {
 			if _, ok := err.(storagedriver.PathNotFoundError); ok {
 				err = nil // pass this through, backend is responding, but this path doesn't exist.
 			}
+			if err != nil {
+				dcontext.GetLogger(app).Error(err)
+			}
 			return err
 		}
 
