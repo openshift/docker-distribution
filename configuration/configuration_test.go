@@ -128,6 +128,13 @@ var configStruct = Configuration{
 			Disabled: false,
 		},
 	},
+	Validation: Validation{
+		Manifests: ValidationManifests{
+			Indexes: ValidationIndexes{
+				Platforms: "none",
+			},
+		},
+	},
 }
 
 // configYamlV0_1 is a Version 0.1 yaml document representing configStruct
@@ -172,6 +179,10 @@ http:
     - /path/to/ca.pem
   headers:
     X-Content-Type-Options: [nosniff]
+validation:
+  manifests:
+    indexes:
+      platforms: none
 `
 
 // inmemoryConfigYamlV0_1 is a Version 0.1 yaml document specifying an inmemory
@@ -201,6 +212,10 @@ notifications:
 http:
   headers:
     X-Content-Type-Options: [nosniff]
+validation:
+  manifests:
+    indexes:
+      platforms: none
 `
 
 type ConfigSuite struct {
@@ -259,6 +274,7 @@ func (suite *ConfigSuite) TestParseIncomplete(c *check.C) {
 	suite.expectedConfig.Reporting = Reporting{}
 	suite.expectedConfig.Notifications = Notifications{}
 	suite.expectedConfig.HTTP.Headers = nil
+	suite.expectedConfig.Validation.Manifests.Indexes.Platforms = ""
 
 	// Note: this also tests that REGISTRY_STORAGE and
 	// REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY can be used together
@@ -550,6 +566,12 @@ func copyConfig(config Configuration) *Configuration {
 	configCopy.HTTP.Headers = make(http.Header)
 	for k, v := range config.HTTP.Headers {
 		configCopy.HTTP.Headers[k] = v
+	}
+
+	configCopy.Validation = Validation{
+		Enabled:   config.Validation.Enabled,
+		Disabled:  config.Validation.Disabled,
+		Manifests: config.Validation.Manifests,
 	}
 
 	return configCopy

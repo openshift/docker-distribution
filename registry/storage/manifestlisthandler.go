@@ -12,9 +12,10 @@ import (
 
 // manifestListHandler is a ManifestHandler that covers schema2 manifest lists.
 type manifestListHandler struct {
-	repository distribution.Repository
-	blobStore  distribution.BlobStore
-	ctx        context.Context
+	repository           distribution.Repository
+	blobStore            distribution.BlobStore
+	ctx                  context.Context
+	validateImageIndexes validateImageIndexes
 }
 
 var _ ManifestHandler = &manifestListHandler{}
@@ -67,24 +68,22 @@ func (ms *manifestListHandler) verifyManifest(ctx context.Context, mnfst manifes
 		return fmt.Errorf("unrecognized manifest list schema version %d", mnfst.SchemaVersion)
 	}
 
-	if !skipDependencyVerification {
-		// This manifest service is different from the blob service
-		// returned by Blob. It uses a linked blob store to ensure that
-		// only manifests are accessible.
-
+	if ms.validateImageIndexes.imagesExist && !skipDependencyVerification {
 		manifestService, err := ms.repository.Manifests(ctx)
 		if err != nil {
 			return err
 		}
 
 		for _, manifestDescriptor := range mnfst.References() {
-			exists, err := manifestService.Exists(ctx, manifestDescriptor.Digest)
-			if err != nil && err != distribution.ErrBlobUnknown {
-				errs = append(errs, err)
-			}
-			if err != nil || !exists {
-				// On error here, we always append unknown blob errors.
-				errs = append(errs, distribution.ErrManifestBlobUnknown{Digest: manifestDescriptor.Digest})
+			if ms.platformMustExist(manifestDescriptor) {
+				exists, err := manifestService.Exists(ctx, manifestDescriptor.Digest)
+				if err != nil && err != distribution.ErrBlobUnknown {
+					errs = append(errs, err)
+				}
+				if err != nil || !exists {
+					// On error here, we always append unknown blob errors.
+					errs = append(errs, distribution.ErrManifestBlobUnknown{Digest: manifestDescriptor.Digest})
+				}
 			}
 		}
 	}
@@ -93,4 +92,25 @@ func (ms *manifestListHandler) verifyManifest(ctx context.Context, mnfst manifes
 	}
 
 	return nil
+}
+
+// platformMustExist checks if a descriptor within an index should be validated as existing before accepting the manifest into the registry.
+func (ms *manifestListHandler) platformMustExist(descriptor distribution.Descriptor) bool {
+	// If there are no image platforms configured to validate, we must check the existence of all child images.
+	if len(ms.validateImageIndexes.imagePlatforms) == 0 {
+		return true
+	}
+
+	imagePlatform := descriptor.Platform
+
+	// If the platform matches a platform that is configured to validate, we must check the existence.
+	for _, platform := range ms.validateImageIndexes.imagePlatforms {
+		if imagePlatform.Architecture == platform.architecture &&
+			imagePlatform.OS == platform.os {
+			return true
+		}
+	}
+
+	// If the platform doesn't match a platform configured to validate, we don't need to check the existence.
+	return false
 }
