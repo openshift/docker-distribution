@@ -487,10 +487,7 @@ func (d *driver) listBlobs(ctx context.Context, virtPath string) ([]string, erro
 	// This is to cover for the cases when the rootDirectory of the driver is either "" or "/".
 	// In those cases, there is no root prefix to replace and we must actually add a "/" to all
 	// results in order to keep them as valid paths as recognized by storagedriver.PathRegexp
-	prefix := ""
-	if blobPrefix == "" {
-		prefix = "/"
-	}
+	prefix := "/"
 
 	out := []string{}
 
@@ -522,7 +519,9 @@ func (d *driver) blobName(path string) string {
 		return path
 	}
 
-	return strings.TrimLeft(strings.TrimRight(d.rootDirectory, "/")+path, "/")
+	trimmedRoot := strings.TrimRight(d.rootDirectory, "/")
+	trimmedPath := strings.TrimLeft(path, "/")
+	return trimmedRoot + "/" + trimmedPath
 }
 
 // TODO(milosgajdos): consider renaming this func
