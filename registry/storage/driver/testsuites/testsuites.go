@@ -405,31 +405,28 @@ func (suite *DriverSuite) testContinueStreamAppend(c *check.C, chunkSize int64) 
 	filename := randomPath(32)
 	defer suite.deletePath(c, firstPart(filename))
 
-	contentsChunk1 := randomContents(chunkSize)
-	contentsChunk2 := randomContents(chunkSize)
-	contentsChunk3 := randomContents(chunkSize)
-
-	fullContents := append(append(contentsChunk1, contentsChunk2...), contentsChunk3...)
+	var fullContents bytes.Buffer
+	contents := io.TeeReader(newRandReader(chunkSize*3), &fullContents)
 
 	writer, err := suite.StorageDriver.Writer(suite.ctx, filename, false)
 	c.Assert(err, check.IsNil)
-	nn, err := io.Copy(writer, bytes.NewReader(contentsChunk1))
+	nn, err := io.CopyN(writer, contents, chunkSize)
 	c.Assert(err, check.IsNil)
-	c.Assert(nn, check.Equals, int64(len(contentsChunk1)))
+	c.Assert(nn, check.Equals, chunkSize)
 
 	err = writer.Close()
 	c.Assert(err, check.IsNil)
 
 	curSize := writer.Size()
-	c.Assert(curSize, check.Equals, int64(len(contentsChunk1)))
+	c.Assert(curSize, check.Equals, chunkSize)
 
 	writer, err = suite.StorageDriver.Writer(suite.ctx, filename, true)
 	c.Assert(err, check.IsNil)
 	c.Assert(writer.Size(), check.Equals, curSize)
 
-	nn, err = io.Copy(writer, bytes.NewReader(contentsChunk2))
+	nn, err = io.CopyN(writer, contents, chunkSize)
 	c.Assert(err, check.IsNil)
-	c.Assert(nn, check.Equals, int64(len(contentsChunk2)))
+	c.Assert(nn, check.Equals, chunkSize)
 
 	err = writer.Close()
 	c.Assert(err, check.IsNil)
@@ -441,9 +438,9 @@ func (suite *DriverSuite) testContinueStreamAppend(c *check.C, chunkSize int64) 
 	c.Assert(err, check.IsNil)
 	c.Assert(writer.Size(), check.Equals, curSize)
 
-	nn, err = io.Copy(writer, bytes.NewReader(fullContents[curSize:]))
+	nn, err = io.CopyN(writer, contents, chunkSize)
 	c.Assert(err, check.IsNil)
-	c.Assert(nn, check.Equals, int64(len(fullContents[curSize:])))
+	c.Assert(nn, check.Equals, chunkSize)
 
 	err = writer.Commit()
 	c.Assert(err, check.IsNil)
@@ -452,7 +449,7 @@ func (suite *DriverSuite) testContinueStreamAppend(c *check.C, chunkSize int64) 
 
 	received, err := suite.StorageDriver.GetContent(suite.ctx, filename)
 	c.Assert(err, check.IsNil)
-	c.Assert(received, check.DeepEquals, fullContents)
+	c.Assert(received, check.DeepEquals, fullContents.Bytes())
 }
 
 // TestReadNonexistentStream tests that reading a stream for a nonexistent path
