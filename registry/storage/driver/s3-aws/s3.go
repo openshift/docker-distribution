@@ -42,17 +42,6 @@ import (
 	"github.com/distribution/distribution/v3/registry/storage/driver/factory"
 )
 
-// additionalRegions is a slice with regions not listed among the default
-// regions supported by aws-sdk-go v1. the v1 of the sdk is in maintenance
-// therefore it does not receive new regions as aws infrastructure grows.
-var additionalRegions = []string{
-	"ap-southeast-5", // Asia Pacific (Malaysia)
-	"ap-southeast-7", // Asia Pacific (Thailand)
-	"ca-west-1",      // Canada West (Calgary)
-	"il-central-1",   // Israel (Tel Aviv)
-	"mx-central-1",   // Mexico (Central)
-}
-
 const driverName = "s3aws"
 
 // minChunkSize defines the minimum multipart upload chunk size
@@ -96,9 +85,6 @@ var s3StorageClasses = []string{
 	s3.StorageClassExpressOnezone,
 }
 
-// validRegions maps known s3 region identifiers to region descriptors
-var validRegions = map[string]struct{}{}
-
 // validObjectACLs contains known s3 object Acls
 var validObjectACLs = map[string]struct{}{}
 
@@ -132,17 +118,6 @@ type DriverParameters struct {
 }
 
 func init() {
-	partitions := endpoints.DefaultPartitions()
-	for _, p := range partitions {
-		for region := range p.Regions() {
-			validRegions[region] = struct{}{}
-		}
-	}
-
-	for _, region := range additionalRegions {
-		validRegions[region] = struct{}{}
-	}
-
 	for _, objectACL := range []string{
 		s3.ObjectCannedACLPrivate,
 		s3.ObjectCannedACLPublicRead,
@@ -236,9 +211,6 @@ func FromParameters(ctx context.Context, parameters map[string]any) (*Driver, er
 	if regionEndpoint == "" {
 		if regionName == nil || region == "" {
 			return nil, fmt.Errorf("no region parameter provided")
-		}
-		if _, ok := validRegions[region]; !ok {
-			return nil, fmt.Errorf("invalid region provided: %v", region)
 		}
 	}
 
