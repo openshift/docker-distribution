@@ -64,6 +64,7 @@ type Parameters struct {
 	ApplicationCredentialID     string
 	ApplicationCredentialName   string
 	ApplicationCredentialSecret string
+	TokenID                     string
 	AuthURL                     string
 	Tenant                      string
 	TenantID                    string
@@ -161,16 +162,12 @@ func FromParameters(parameters map[string]interface{}) (*Driver, error) {
 		return nil, err
 	}
 
-	if params.Username == "" {
-		if params.ApplicationCredentialID == "" && params.ApplicationCredentialName == "" {
-			return nil, fmt.Errorf("no username or application-credential provided")
-		}
+	if params.Username == "" && params.TokenID == "" && params.ApplicationCredentialID == "" && params.ApplicationCredentialName == "" {
+		return nil, fmt.Errorf("no username, tokenID, or application-credential provided")
 	}
 
-	if params.Password == "" {
-		if params.ApplicationCredentialID == "" {
-			return nil, fmt.Errorf("no password or application-credential-secret parameter provided")
-		}
+	if params.Password == "" && params.TokenID == "" && params.ApplicationCredentialID == "" {
+		return nil, fmt.Errorf("no password, tokenID, or application-credential-secret parameter provided")
 	}
 
 	if params.AuthURL == "" {
@@ -203,7 +200,7 @@ func New(params Parameters) (*Driver, error) {
 		ApplicationCredentialId:     params.ApplicationCredentialID,
 		ApplicationCredentialName:   params.ApplicationCredentialName,
 		ApplicationCredentialSecret: params.ApplicationCredentialSecret,
-		Token:                       params.ApplicationCredentialSecret,
+		Token:                       params.TokenID,
 		AuthUrl:                     params.AuthURL,
 		Region:                      params.Region,
 		AuthVersion:                 params.AuthVersion,
