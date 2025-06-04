@@ -23,6 +23,7 @@ func init() {
 		applicationCredentialID     = os.Getenv("SWIFT_APPLICATIONCREDENTIALID")
 		applicationCredentialName   = os.Getenv("SWIFT_APPLICATIONCREDENTIALNAME")
 		applicationCredentialSecret = os.Getenv("SWIFT_APPLICATIONCREDENTIALSECRET")
+		token                       = os.Getenv("SWIFT_TOKEN")
 		authURL                     = os.Getenv("SWIFT_AUTH_URL")
 		tenant                      = os.Getenv("SWIFT_TENANT_NAME")
 		tenantID                    = os.Getenv("SWIFT_TENANT_ID")
@@ -62,6 +63,7 @@ func init() {
 			applicationCredentialID,
 			applicationCredentialName,
 			applicationCredentialSecret,
+			token,
 			authURL,
 			tenant,
 			tenantID,
