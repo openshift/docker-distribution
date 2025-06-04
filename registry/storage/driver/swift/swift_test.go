@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ncw/swift/swifttest"
+	"github.com/ncw/swift/v2/swifttest"
 
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/distribution/v3/registry/storage/driver/testsuites"

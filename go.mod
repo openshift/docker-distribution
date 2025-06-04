@@ -23,7 +23,7 @@ require (
 	github.com/hashicorp/golang-lru/arc/v2 v2.0.5
 	github.com/klauspost/compress v1.18.4
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/ncw/swift v1.0.47
+	github.com/ncw/swift/v2 v2.0.4
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/redis/go-redis/extra/redisotel/v9 v9.0.5
