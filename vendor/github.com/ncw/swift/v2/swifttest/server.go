@@ -3,11 +3,13 @@
 //
 // This comes from the https://github.com/mitchellh/goamz
 // and was adapted for Swift
-//
 package swifttest
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/bzip2"
+	"compress/gzip"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
@@ -16,7 +18,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"mime"
 	"net"
@@ -24,19 +25,17 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
-
-	"github.com/ncw/swift"
 )
 
-const (
+var (
 	DEBUG        = false
 	TEST_ACCOUNT = "swifttest"
 )
@@ -49,8 +48,6 @@ type SwiftServer struct {
 	// See https://golang.org/pkg/sync/atomic/#pkg-note-BUG for more details.
 	reqId int64
 	sync.RWMutex
-	t        *testing.T
-	mu       sync.Mutex
 	Listener net.Listener
 	AuthURL  string
 	URL      string
@@ -82,6 +79,12 @@ type Subdir struct {
 	Subdir string `json:"subdir"`
 }
 
+type AutoExtractResponse struct {
+	CreatedFiles int64      `json:"Number Files Created"`
+	Status       string     `json:"Response Status"`
+	Errors       [][]string `json:"Errors"`
+}
+
 type swiftError struct {
 	statusCode int
 	Code       string
@@ -104,9 +107,15 @@ type metadata struct {
 	meta http.Header // metadata to return with requests.
 }
 
+type swiftaccount struct {
+	BytesUsed  int64 // total number of bytes used
+	Containers int64 // total number of containers
+	Objects    int64 // total number of objects
+}
+
 type account struct {
 	sync.RWMutex
-	swift.Account
+	swiftaccount
 	metadata
 	password       string
 	ContainersLock sync.RWMutex
@@ -131,7 +140,6 @@ type container struct {
 	sync.RWMutex
 	metadata
 	name    string
-	ctime   time.Time
 	objects map[string]*object
 }
 
@@ -174,15 +182,6 @@ type containerResource struct {
 	container *container // non-nil if the container already exists.
 }
 
-var responseParams = map[string]bool{
-	"content-type":        true,
-	"content-language":    true,
-	"expires":             true,
-	"cache-control":       true,
-	"content-disposition": true,
-	"content-encoding":    true,
-}
-
 func fatalf(code int, codeStr string, errf string, a ...interface{}) {
 	panic(&swiftError{
 		statusCode: code,
@@ -194,6 +193,7 @@ func fatalf(code int, codeStr string, errf string, a ...interface{}) {
 func (m metadata) setMetadata(a *action, resource string) {
 	for key, values := range a.req.Header {
 		key = http.CanonicalHeaderKey(key)
+		//nolint:staticcheck // strings.Title is broken in a way this test code doesn't care about
 		if metaHeaders[key] || strings.HasPrefix(key, "X-"+strings.Title(resource)+"-Meta-") {
 			if values[0] != "" || resource == "object" {
 				m.meta[key] = values
@@ -305,9 +305,15 @@ func (r containerResource) get(a *action) interface{} {
 	} else {
 		for _, item := range objects {
 			if obj, ok := item.(*object); ok {
-				a.w.Write([]byte(obj.name + "\n"))
+				_, err := a.w.Write([]byte(obj.name + "\n"))
+				if err != nil {
+					fatalf(500, "WriteFailed", "Write failed")
+				}
 			} else if subdir, ok := item.(Subdir); ok {
-				a.w.Write([]byte(subdir.Subdir + "\n"))
+				_, err := a.w.Write([]byte(subdir.Subdir + "\n"))
+				if err != nil {
+					fatalf(500, "WriteFailed", "Write failed")
+				}
 			}
 		}
 		return nil
@@ -338,16 +344,12 @@ func (r containerResource) delete(a *action) interface{} {
 	}
 	a.user.Lock()
 	delete(a.user.Containers, b.name)
-	a.user.Account.Containers--
+	a.user.swiftaccount.Containers--
 	a.user.Unlock()
 	return nil
 }
 
 func (r containerResource) put(a *action) interface{} {
-	if a.req.URL.Query().Get("extract-archive") != "" {
-		fatalf(403, "Operation forbidden", "Bulk upload is not supported")
-	}
-
 	if r.container == nil {
 		if !validContainerName(r.name) {
 			fatalf(400, "InvalidContainerName", "The specified container is not valid")
@@ -363,8 +365,133 @@ func (r containerResource) put(a *action) interface{} {
 
 		a.user.Lock()
 		a.user.Containers[r.name] = r.container
-		a.user.Account.Containers++
+		a.user.swiftaccount.Containers++
 		a.user.Unlock()
+	}
+
+	if format := a.req.URL.Query().Get("extract-archive"); format != "" {
+		_, _, objectName, _ := a.srv.parseURL(a.req.URL)
+
+		data, err := io.ReadAll(a.req.Body)
+		if err != nil {
+			fatalf(400, "TODO", "read error")
+		}
+		if a.req.ContentLength >= 0 && int64(len(data)) != a.req.ContentLength {
+			fatalf(400, "IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header")
+		}
+
+		dataReader := bytes.NewReader(data)
+		var reader *tar.Reader
+		switch format {
+		case "tar":
+			reader = tar.NewReader(dataReader)
+		case "tar.gz":
+			gzr, err := gzip.NewReader(dataReader)
+			if err != nil {
+				fatalf(400, "TODO", "Invalid tar.gz")
+			}
+			defer func() {
+				err := gzr.Close()
+				if err != nil {
+					fatalf(400, "CloseFailed", "Close failed")
+				}
+			}()
+			reader = tar.NewReader(gzr)
+		case "tar.bz2":
+			bzr := bzip2.NewReader(dataReader)
+			reader = tar.NewReader(bzr)
+		default:
+			fatalf(400, "TODO", "Invalid format %s", format)
+		}
+
+		resp := AutoExtractResponse{}
+		for {
+			header, err := reader.Next()
+			if err == io.EOF {
+				break
+			}
+			if header == nil {
+				continue
+			}
+
+			if header.Typeflag == tar.TypeDir {
+				continue
+			}
+
+			var fullPath string
+			if objectName != "" {
+				fullPath = objectName + "/" + header.Name
+			} else {
+				fullPath = header.Name
+			}
+
+			obj := r.container.objects[fullPath]
+			if obj == nil {
+				// new object
+				obj = &object{
+					name: fullPath,
+					metadata: metadata{
+						meta: make(http.Header),
+					},
+				}
+				atomic.AddInt64(&a.user.Objects, 1)
+			} else {
+				atomic.AddInt64(&r.container.bytes, -header.Size)
+				atomic.AddInt64(&a.user.BytesUsed, -header.Size)
+			}
+
+			// Default content_type
+			obj.content_type = "application/octet-stream"
+
+			// handle extended attributes
+			records := getPAXRecords(header)
+			for k, v := range records {
+				ks := strings.SplitN(k, "SCHILY.xattr.user.", 2)
+				if len(ks) < 2 {
+					continue
+				}
+
+				if ks[1] == "mime_type" {
+					obj.content_type = v
+				}
+
+				if strings.HasPrefix(ks[1], "meta.") {
+					meta := strings.TrimLeft(ks[1], "meta.")
+					//nolint:staticcheck // strings.Title is broken in a way that this test code doesn't care about
+					obj.meta["X-Object-Meta-"+strings.Title(meta)] = []string{v}
+				}
+			}
+
+			sum := md5.New()
+			objData, err := io.ReadAll(io.TeeReader(reader, sum))
+			if err != nil {
+				errArr := []string{fullPath, fmt.Sprintf("read error: %v", err)}
+				resp.Errors = append(resp.Errors, errArr)
+				continue
+			}
+			gotHash := sum.Sum(nil)
+
+			obj.data = objData
+			obj.checksum = gotHash
+			obj.mtime = time.Now().UTC()
+			r.container.Lock()
+			r.container.objects[fullPath] = obj
+			r.container.bytes += header.Size
+			r.container.Unlock()
+
+			atomic.AddInt64(&a.user.BytesUsed, header.Size)
+			atomic.AddInt64(&resp.CreatedFiles, 1)
+		}
+
+		resp.Status = "201 Accepted"
+		status := 201
+		if len(resp.Errors) > 0 {
+			resp.Status = "400 Error"
+			status = 400
+		}
+		a.w.Header().Set("Content-Type", "application/json")
+		a.w.WriteHeader(status)
+		jsonMarshal(a.w, resp)
 	}
 
 	return nil
@@ -390,12 +517,28 @@ func (r containerResource) post(a *action) interface{} {
 
 func (containerResource) copy(a *action) interface{} { return notAllowed() }
 
+func getPAXRecords(h *tar.Header) map[string]string {
+	rHeader := reflect.ValueOf(h)
+
+	// Try PAXRecords - go 1.10
+	paxField := rHeader.Elem().FieldByName("PAXRecords")
+	if paxField.IsValid() {
+		return paxField.Interface().(map[string]string)
+	}
+
+	// Try Xattrs - go 1.3
+	xAttrsField := rHeader.Elem().FieldByName("Xattrs")
+	if xAttrsField.IsValid() {
+		return xAttrsField.Interface().(map[string]string)
+	}
+	return map[string]string{}
+}
+
 // validContainerName returns whether name is a valid bucket name.
 // Here are the rules, from:
 // http://docs.openstack.org/api/openstack-object-storage/1.0/content/ch_object-storage-dev-api-storage.html
 //
 // Container names cannot exceed 256 bytes and cannot contain the / character.
-//
 func validContainerName(name string) bool {
 	if len(name) == 0 || len(name) > 256 {
 		return false
@@ -512,7 +655,10 @@ func (objr objectResource) get(a *action) interface{} {
 	} else if value, ok := obj.meta["X-Static-Large-Object"]; ok && value[0] == "True" && a.req.URL.Query().Get("multipart-manifest") != "get" {
 		var segments []io.Reader
 		var segmentList []segment
-		json.Unmarshal(obj.data, &segmentList)
+		err := json.Unmarshal(obj.data, &segmentList)
+		if err != nil {
+			fatalf(400, "BadParameters", "Unmarshal failed.")
+		}
 		cursor := 0
 		size := 0
 		sum := md5.New()
@@ -581,12 +727,12 @@ func (objr objectResource) put(a *action) interface{} {
 	}
 	sum := md5.New()
 	// TODO avoid holding lock while reading data.
-	data, err := ioutil.ReadAll(io.TeeReader(a.req.Body, sum))
+	data, err := io.ReadAll(io.TeeReader(a.req.Body, sum))
 	if err != nil {
 		fatalf(400, "TODO", "read error")
 	}
 	gotHash := sum.Sum(nil)
-	if expectHash != nil && bytes.Compare(gotHash, expectHash) != 0 {
+	if expectHash != nil && !bytes.Equal(gotHash, expectHash) {
 		fatalf(422, "Bad ETag", "The ETag you specified did not match what we received")
 	}
 	if a.req.ContentLength >= 0 && int64(len(data)) != a.req.ContentLength {
@@ -621,7 +767,10 @@ func (objr objectResource) put(a *action) interface{} {
 		a.req.Header.Set("X-Static-Large-Object", "True")
 
 		var segments []segment
-		json.Unmarshal(data, &segments)
+		err := json.Unmarshal(data, &segments)
+		if err != nil {
+			fatalf(400, "BadParameters", "Unmarshal failed.")
+		}
 		for i := range segments {
 			segments[i].Name = "/" + segments[i].Path
 			segments[i].Path = ""
@@ -726,7 +875,7 @@ func (objr objectResource) copy(a *action) interface{} {
 		fatalf(400, "Bad Request", "Destination must point to a valid object path")
 	}
 
-	if objr2.container.name != objr2.container.name && obj2.name != obj.name {
+	if objr2.container.name != objr.container.name && obj2.name != obj.name {
 		obj2.Lock()
 		defer obj2.Unlock()
 	}
@@ -753,7 +902,10 @@ func (objr objectResource) copy(a *action) interface{} {
 
 func (s *SwiftServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	// ignore error from ParseForm as it's usually spurious.
-	req.ParseForm()
+	err := req.ParseForm()
+	if err != nil {
+		fatalf(400, "BadParameters", "Parse form failed.")
+	}
 
 	if fn := s.override[req.URL.Path]; fn != nil {
 		originalRW := w
@@ -779,10 +931,16 @@ func (s *SwiftServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	defer func() {
 		switch err := recover().(type) {
 		case *swiftError:
+			if DEBUG {
+				fmt.Printf("\t%d - %s\n", err.statusCode, err.Message)
+			}
 			w.Header().Set("Content-Type", `text/plain; charset=utf-8`)
 			http.Error(w, err.Message, err.statusCode)
 		case nil:
 		default:
+			if DEBUG {
+				fmt.Printf("\tpanic %s\n", err)
+			}
 			panic(err)
 		}
 	}()
@@ -800,8 +958,8 @@ func (s *SwiftServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 				_, _ = rand.Read(r)
 				id := fmt.Sprintf("%X", r)
 				w.Header().Set("X-Storage-Url", s.URL+"/AUTH_"+username)
-				w.Header().Set("X-Auth-Token", "AUTH_tk"+string(id))
-				w.Header().Set("X-Storage-Token", "AUTH_tk"+string(id))
+				w.Header().Set("X-Auth-Token", "AUTH_tk"+id)
+				w.Header().Set("X-Storage-Token", "AUTH_tk"+id)
 				s.Sessions[id] = &session{
 					username: username,
 				}
@@ -812,7 +970,7 @@ func (s *SwiftServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if req.URL.String() == "/info" {
-		jsonMarshal(w, &swift.SwiftInfo{
+		jsonMarshal(w, &map[string]interface{}{
 			"swift": map[string]interface{}{
 				"version": "1.2",
 			},
@@ -862,7 +1020,6 @@ func (s *SwiftServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		if !ok {
 			s.RUnlock()
 			panic(notAuthorized())
-			return
 		}
 
 		a.user = s.Accounts[session.username]
@@ -892,9 +1049,15 @@ func (s *SwiftServer) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		} else {
 			switch r := resp.(type) {
 			case string:
-				w.Write([]byte(r))
+				_, err := w.Write([]byte(r))
+				if err != nil {
+					fatalf(500, "WriteFailed", "Write failed.")
+				}
 			default:
-				w.Write(resp.([]byte))
+				_, err := w.Write(resp.([]byte))
+				if err != nil {
+					fatalf(500, "WriteFailed", "Write failed.")
+				}
 			}
 		}
 	}
@@ -919,7 +1082,7 @@ var pathRegexp = regexp.MustCompile("/v1/AUTH_([a-zA-Z0-9]+)(/([^/]+)(/(.*))?)?"
 func (srv *SwiftServer) parseURL(u *url.URL) (account string, container string, object string, err error) {
 	m := pathRegexp.FindStringSubmatch(u.Path)
 	if m == nil {
-		return "", "", "", fmt.Errorf("Couldn't parse the specified URI")
+		return "", "", "", fmt.Errorf("couldn't parse the specified URI")
 	}
 	account = m[1]
 	container = m[3]
@@ -932,7 +1095,7 @@ func (srv *SwiftServer) resourceForURL(u *url.URL) (r resource) {
 	accountName, containerName, objectName, err := srv.parseURL(u)
 
 	if err != nil {
-		fatalf(404, "InvalidURI", err.Error())
+		fatalf(404, "InvalidURI", "%s", err.Error())
 	}
 
 	srv.RLock()
@@ -977,9 +1140,6 @@ func (srv *SwiftServer) resourceForURL(u *url.URL) (r resource) {
 	return objr
 }
 
-// nullResource has error stubs for all resource methods.
-type nullResource struct{}
-
 func notAllowed() interface{} {
 	fatalf(400, "MethodNotAllowed", "The specified method is not allowed against this resource")
 	return nil
@@ -989,12 +1149,6 @@ func notAuthorized() interface{} {
 	fatalf(401, "Unauthorized", "This server could not verify that you are authorized to access the document you requested.")
 	return nil
 }
-
-func (nullResource) put(a *action) interface{}    { return notAllowed() }
-func (nullResource) get(a *action) interface{}    { return notAllowed() }
-func (nullResource) post(a *action) interface{}   { return notAllowed() }
-func (nullResource) delete(a *action) interface{} { return notAllowed() }
-func (nullResource) copy(a *action) interface{}   { return notAllowed() }
 
 type rootResource struct{}
 
@@ -1007,7 +1161,7 @@ func (rootResource) get(a *action) interface{} {
 	h := a.w.Header()
 
 	h.Set("X-Account-Bytes-Used", strconv.Itoa(int(atomic.LoadInt64(&a.user.BytesUsed))))
-	h.Set("X-Account-Container-Count", strconv.Itoa(int(atomic.LoadInt64(&a.user.Account.Containers))))
+	h.Set("X-Account-Container-Count", strconv.Itoa(int(atomic.LoadInt64(&a.user.swiftaccount.Containers))))
 	h.Set("X-Account-Object-Count", strconv.Itoa(int(atomic.LoadInt64(&a.user.Objects))))
 
 	a.user.RLock()
@@ -1041,7 +1195,10 @@ func (rootResource) get(a *action) interface{} {
 				Name:  container.name,
 			})
 		} else {
-			a.w.Write([]byte(container.name + "\n"))
+			_, err := a.w.Write([]byte(container.name + "\n"))
+			if err != nil {
+				fatalf(500, "WriteFailed", "Write failed.")
+			}
 		}
 	}
 
@@ -1059,9 +1216,73 @@ func (r rootResource) post(a *action) interface{} {
 	return nil
 }
 
-func (rootResource) delete(a *action) interface{} {
+func (r rootResource) delete(a *action) interface{} {
 	if a.req.URL.Query().Get("bulk-delete") == "1" {
-		fatalf(403, "Operation forbidden", "Bulk delete is not supported")
+		data, err := io.ReadAll(a.req.Body)
+		if err != nil {
+			fatalf(400, "Bad Request", "read error")
+		}
+		var nb, notFound int
+		for _, obj := range strings.Fields(string(data)) {
+			parts := strings.SplitN(obj, "/", 3)
+			if len(parts) < 3 {
+				fatalf(403, "Operation forbidden", "Bulk delete is not supported for containers")
+			}
+			b := containerResource{
+				name:      parts[1],
+				container: a.user.Containers[parts[1]],
+			}
+			if b.container == nil {
+				notFound++
+				continue
+			}
+
+			objr := objectResource{
+				name:      parts[2],
+				container: b.container,
+			}
+			objr.container.RLock()
+			if obj := objr.container.objects[objr.name]; obj != nil {
+				objr.object = obj
+			}
+			objr.container.RUnlock()
+			if objr.object == nil {
+				notFound++
+				continue
+			}
+
+			objr.container.Lock()
+			objr.object.Lock()
+			objr.container.bytes -= int64(len(objr.object.data))
+			delete(objr.container.objects, objr.name)
+			objr.object.Unlock()
+			objr.container.Unlock()
+
+			atomic.AddInt64(&a.user.BytesUsed, -int64(len(objr.object.data)))
+			atomic.AddInt64(&a.user.Objects, -1)
+			nb++
+		}
+
+		accept := a.req.Header.Get("Accept")
+		if strings.HasPrefix(accept, "application/json") {
+			a.w.Header().Set("Content-Type", "application/json")
+			resp := map[string]interface{}{
+				"Number Deleted":   nb,
+				"Number Not Found": notFound,
+				"Errors":           []string{},
+				"Response Status":  "200 OK",
+				"Response Body":    "",
+			}
+			jsonMarshal(a.w, resp)
+			return nil
+		}
+
+		resp := fmt.Sprintf("Number Deleted: %d\nNumber Not Found: %d\nErrors: \nResponse Status: 200 OK\n", nb, notFound)
+		_, err = a.w.Write([]byte(resp))
+		if err != nil {
+			fatalf(500, "WriteFailed", "Write failed.")
+		}
+		return nil
 	}
 
 	return notAllowed()
@@ -1070,7 +1291,7 @@ func (rootResource) delete(a *action) interface{} {
 func (rootResource) copy(a *action) interface{} { return notAllowed() }
 
 func NewSwiftServer(address string) (*SwiftServer, error) {
-	if strings.Index(address, ":") == -1 {
+	if !strings.Contains(address, ":") {
 		address += ":0"
 	}
 	l, err := net.Listen("tcp", address)
@@ -1095,13 +1316,15 @@ func NewSwiftServer(address string) (*SwiftServer, error) {
 		Containers: make(map[string]*container),
 	}
 
-	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		server.serveHTTP(w, req)
-	}))
+	go func() {
+		_ = http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			server.serveHTTP(w, req)
+		}))
+	}()
 
 	return server, nil
 }
 
 func (srv *SwiftServer) Close() {
-	srv.Listener.Close()
+	_ = srv.Listener.Close()
 }
