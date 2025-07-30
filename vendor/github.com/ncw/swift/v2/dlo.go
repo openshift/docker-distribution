@@ -1,7 +1,9 @@
 package swift
 
 import (
+	"context"
 	"os"
+	"strings"
 )
 
 // DynamicLargeObjectCreateFile represents an open static large object
@@ -13,8 +15,8 @@ type DynamicLargeObjectCreateFile struct {
 // returning an object which satisfies io.Writer, io.Seeker, io.Closer
 // and io.ReaderFrom.  The flags are as passes to the
 // largeObjectCreate method.
-func (c *Connection) DynamicLargeObjectCreateFile(opts *LargeObjectOpts) (LargeObjectFile, error) {
-	lo, err := c.largeObjectCreate(opts)
+func (c *Connection) DynamicLargeObjectCreateFile(ctx context.Context, opts *LargeObjectOpts) (LargeObjectFile, error) {
+	lo, err := c.largeObjectCreate(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -27,40 +29,56 @@ func (c *Connection) DynamicLargeObjectCreateFile(opts *LargeObjectOpts) (LargeO
 // DynamicLargeObjectCreate creates or truncates an existing dynamic
 // large object returning a writeable object.  This sets opts.Flags to
 // an appropriate value before calling DynamicLargeObjectCreateFile
-func (c *Connection) DynamicLargeObjectCreate(opts *LargeObjectOpts) (LargeObjectFile, error) {
+func (c *Connection) DynamicLargeObjectCreate(ctx context.Context, opts *LargeObjectOpts) (LargeObjectFile, error) {
 	opts.Flags = os.O_TRUNC | os.O_CREATE
-	return c.DynamicLargeObjectCreateFile(opts)
+	return c.DynamicLargeObjectCreateFile(ctx, opts)
 }
 
 // DynamicLargeObjectDelete deletes a dynamic large object and all of its segments.
-func (c *Connection) DynamicLargeObjectDelete(container string, path string) error {
-	return c.LargeObjectDelete(container, path)
+func (c *Connection) DynamicLargeObjectDelete(ctx context.Context, container string, path string) error {
+	return c.LargeObjectDelete(ctx, container, path)
 }
 
 // DynamicLargeObjectMove moves a dynamic large object from srcContainer, srcObjectName to dstContainer, dstObjectName
-func (c *Connection) DynamicLargeObjectMove(srcContainer string, srcObjectName string, dstContainer string, dstObjectName string) error {
-	info, headers, err := c.Object(dstContainer, srcObjectName)
+func (c *Connection) DynamicLargeObjectMove(ctx context.Context, srcContainer string, srcObjectName string, dstContainer string, dstObjectName string) error {
+	info, headers, err := c.Object(ctx, srcContainer, srcObjectName)
 	if err != nil {
 		return err
 	}
 
-	segmentContainer, segmentPath := parseFullPath(headers["X-Object-Manifest"])
-	if err := c.createDLOManifest(dstContainer, dstObjectName, segmentContainer+"/"+segmentPath, info.ContentType); err != nil {
+	segmentContainer, segmentPath, err := parseFullPath(headers["X-Object-Manifest"])
+	if err != nil {
 		return err
 	}
 
-	if err := c.ObjectDelete(srcContainer, srcObjectName); err != nil {
+	if err := c.createDLOManifest(ctx, dstContainer, dstObjectName, segmentContainer+"/"+segmentPath, info.ContentType, sanitizeLargeObjectMoveHeaders(headers)); err != nil {
+		return err
+	}
+
+	if err := c.ObjectDelete(ctx, srcContainer, srcObjectName); err != nil {
 		return err
 	}
 
 	return nil
 }
 
+func sanitizeLargeObjectMoveHeaders(headers Headers) Headers {
+	sanitizedHeaders := make(map[string]string, len(headers))
+	for k, v := range headers {
+		if strings.HasPrefix(k, "X-") { //Some of the fields does not effect the request e,g, X-Timestamp, X-Trans-Id, X-Openstack-Request-Id. Open stack will generate new ones anyway.
+			sanitizedHeaders[k] = v
+		}
+	}
+	return sanitizedHeaders
+}
+
 // createDLOManifest creates a dynamic large object manifest
-func (c *Connection) createDLOManifest(container string, objectName string, prefix string, contentType string) error {
-	headers := make(Headers)
+func (c *Connection) createDLOManifest(ctx context.Context, container string, objectName string, prefix string, contentType string, headers Headers) error {
+	if headers == nil {
+		headers = make(Headers)
+	}
 	headers["X-Object-Manifest"] = prefix
-	manifest, err := c.ObjectCreate(container, objectName, false, "", contentType, headers)
+	manifest, err := c.ObjectCreate(ctx, container, objectName, false, "", contentType, headers)
 	if err != nil {
 		return err
 	}
@@ -74,20 +92,24 @@ func (c *Connection) createDLOManifest(container string, objectName string, pref
 
 // Close satisfies the io.Closer interface
 func (file *DynamicLargeObjectCreateFile) Close() error {
-	return file.Flush()
+	return file.CloseWithContext(context.Background())
 }
 
-func (file *DynamicLargeObjectCreateFile) Flush() error {
-	err := file.conn.createDLOManifest(file.container, file.objectName, file.segmentContainer+"/"+file.prefix, file.contentType)
+func (file *DynamicLargeObjectCreateFile) CloseWithContext(ctx context.Context) error {
+	return file.Flush(ctx)
+}
+
+func (file *DynamicLargeObjectCreateFile) Flush(ctx context.Context) error {
+	err := file.conn.createDLOManifest(ctx, file.container, file.objectName, file.segmentContainer+"/"+file.prefix, file.contentType, file.headers)
 	if err != nil {
 		return err
 	}
-	return file.conn.waitForSegmentsToShowUp(file.container, file.objectName, file.Size())
+	return file.conn.waitForSegmentsToShowUp(ctx, file.container, file.objectName, file.Size())
 }
 
-func (c *Connection) getAllDLOSegments(segmentContainer, segmentPath string) ([]Object, error) {
+func (c *Connection) getAllDLOSegments(ctx context.Context, segmentContainer, segmentPath string) ([]Object, error) {
 	//a simple container listing works 99.9% of the time
-	segments, err := c.ObjectsAll(segmentContainer, &ObjectsOpts{Prefix: segmentPath})
+	segments, err := c.ObjectsAll(ctx, segmentContainer, &ObjectsOpts{Prefix: segmentPath})
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +135,7 @@ func (c *Connection) getAllDLOSegments(segmentContainer, segmentPath string) ([]
 		//guaranteed to return the correct metadata, except for the pathological
 		//case of an outage of large parts of the Swift cluster or its network,
 		//since every segment is only written once.)
-		segment, _, err := c.Object(segmentContainer, segmentName)
+		segment, _, err := c.Object(ctx, segmentContainer, segmentName)
 		switch err {
 		case nil:
 			//found new segment -> add it in the correct position and keep
