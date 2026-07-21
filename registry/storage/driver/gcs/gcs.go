@@ -33,6 +33,8 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/auth/oauth2adapt"
 	"cloud.google.com/go/storage"
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/distribution/v3/registry/storage/driver/base"
@@ -79,6 +81,7 @@ type driverParameters struct {
 	// pushes by ensuring we aren't DoSing our own server with many
 	// connections.
 	maxConcurrency uint64
+	storageHost    string
 }
 
 func init() {
@@ -103,6 +106,7 @@ type driver struct {
 	rootDirectory string
 	chunkSize     int
 	gcs           *storage.Client
+	storageHost   string
 }
 
 // Wrapper wraps `driver` with a throttler, ensuring that no more than N
@@ -113,6 +117,30 @@ type Wrapper struct {
 
 type baseEmbed struct {
 	base.Base
+}
+
+// selfSignedTokenSource returns an oauth2.TokenSource that uses self-signed JWTs
+// for non-default universe domains, avoiding the need for the OAuth2 token endpoint.
+// For the default universe domain (googleapis.com), it falls back to the standard
+// credential token source.
+func selfSignedTokenSource(credJSON []byte, universeDomain string) (oauth2.TokenSource, error) {
+	if universeDomain == "" || universeDomain == "googleapis.com" {
+		creds, err := google.CredentialsFromJSON(context.Background(), credJSON, storage.ScopeFullControl)
+		if err != nil {
+			return nil, err
+		}
+		return creds.TokenSource, nil
+	}
+	authCreds, err := credentials.DetectDefault(&credentials.DetectOptions{
+		CredentialsJSON:  credJSON,
+		Scopes:           []string{storage.ScopeFullControl},
+		UseSelfSignedJWT: true,
+		UniverseDomain:   universeDomain,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect credentials for universe domain %s: %w", universeDomain, err)
+	}
+	return oauth2adapt.TokenSourceFromTokenProvider(authCreds.TokenProvider), nil
 }
 
 // FromParameters constructs a new Driver with a given parameters map
@@ -159,6 +187,7 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 	var err error
 	var gcs *storage.Client
 	var creds *google.Credentials
+	storageHost := "storage.googleapis.com"
 	if keyfile, ok := parameters["keyfile"]; ok {
 		jsonKey, err := os.ReadFile(fmt.Sprint(keyfile))
 		if err != nil {
@@ -168,11 +197,24 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 		if err != nil {
 			return nil, err
 		}
-		gcs, err = storage.NewClient(ctx, option.WithCredentialsFile(fmt.Sprint(keyfile)))
+		ud, err := creds.GetUniverseDomain()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get universe domain: %w", err)
+		}
+		storageOpts := []option.ClientOption{option.WithCredentialsJSON(jsonKey)}
+		if ud != "googleapis.com" {
+			storageOpts = append(storageOpts, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
+		}
+		storageOpts = append(storageOpts, option.WithUniverseDomain(ud))
+		gcs, err = storage.NewClient(ctx, storageOpts...)
 		if err != nil {
 			return nil, err
 		}
-		ts = creds.TokenSource
+		ts, err = selfSignedTokenSource(jsonKey, ud)
+		if err != nil {
+			return nil, err
+		}
+		storageHost = fmt.Sprintf("storage.%s", ud)
 	} else if credentials, ok := parameters["credentials"]; ok {
 		credentialMap, ok := credentials.(map[interface{}]interface{})
 		if !ok {
@@ -197,11 +239,24 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 		if err != nil {
 			return nil, err
 		}
-		gcs, err = storage.NewClient(ctx, option.WithCredentialsJSON(data))
+		ud, err := creds.GetUniverseDomain()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get universe domain: %w", err)
+		}
+		storageOpts := []option.ClientOption{option.WithCredentialsJSON(data)}
+		if ud != "googleapis.com" {
+			storageOpts = append(storageOpts, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
+		}
+		storageOpts = append(storageOpts, option.WithUniverseDomain(ud))
+		gcs, err = storage.NewClient(ctx, storageOpts...)
 		if err != nil {
 			return nil, err
 		}
-		ts = creds.TokenSource
+		ts, err = selfSignedTokenSource(data, ud)
+		if err != nil {
+			return nil, err
+		}
+		storageHost = fmt.Sprintf("storage.%s", ud)
 	} else {
 		var err error
 		ts, err = google.DefaultTokenSource(ctx, storage.ScopeFullControl)
@@ -227,6 +282,7 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 		chunkSize:      chunkSize,
 		maxConcurrency: maxConcurrency,
 		gcs:            gcs,
+		storageHost:    storageHost,
 	}
 
 	return New(params)
@@ -249,6 +305,7 @@ func New(params driverParameters) (storagedriver.StorageDriver, error) {
 		client:        params.client,
 		chunkSize:     params.chunkSize,
 		gcs:           params.gcs,
+		storageHost:   params.storageHost,
 	}
 
 	return &Wrapper{
@@ -298,7 +355,7 @@ func (d *driver) PutContent(ctx context.Context, path string, contents []byte) e
 // with a given byte offset.
 // May be used to resume reading a stream by providing a nonzero offset.
 func (d *driver) Reader(ctx context.Context, path string, offset int64) (io.ReadCloser, error) {
-	res, err := getObject(d.client, d.bucket, d.pathToKey(path), offset)
+	res, err := getObject(d.client, d.bucket, d.pathToKey(path), offset, d.storageHost)
 	if err != nil {
 		if res != nil {
 			if res.StatusCode == http.StatusNotFound {
@@ -327,12 +384,10 @@ func (d *driver) Reader(ctx context.Context, path string, offset int64) (io.Read
 	return res.Body, nil
 }
 
-func getObject(client *http.Client, bucket string, name string, offset int64) (*http.Response, error) {
-	// copied from cloud.google.com/go/storage#NewReader :
-	// to set the additional "Range" header
+func getObject(client *http.Client, bucket string, name string, offset int64, storageHost string) (*http.Response, error) {
 	u := &url.URL{
 		Scheme: "https",
-		Host:   "storage.googleapis.com",
+		Host:   storageHost,
 		Path:   fmt.Sprintf("/%s/%s", bucket, name),
 	}
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
@@ -358,11 +413,12 @@ func getObject(client *http.Client, bucket string, name string, offset int64) (*
 // at the location designated by "path" after the call to Commit.
 func (d *driver) Writer(ctx context.Context, path string, append bool) (storagedriver.FileWriter, error) {
 	writer := &writer{
-		client: d.client,
-		bucket: d.bucket,
-		name:   d.pathToKey(path),
-		buffer: make([]byte, d.chunkSize),
-		gcs:    d.gcs,
+		client:      d.client,
+		bucket:      d.bucket,
+		name:        d.pathToKey(path),
+		buffer:      make([]byte, d.chunkSize),
+		gcs:         d.gcs,
+		storageHost: d.storageHost,
 	}
 
 	if append {
@@ -375,16 +431,17 @@ func (d *driver) Writer(ctx context.Context, path string, append bool) (storaged
 }
 
 type writer struct {
-	client     *http.Client
-	bucket     string
-	name       string
-	size       int64
-	offset     int64
-	closed     bool
-	sessionURI string
-	buffer     []byte
-	buffSize   int
-	gcs        *storage.Client
+	client      *http.Client
+	bucket      string
+	name        string
+	size        int64
+	offset      int64
+	closed      bool
+	sessionURI  string
+	buffer      []byte
+	buffSize    int
+	gcs         *storage.Client
+	storageHost string
 }
 
 // Cancel removes any written content from this FileWriter.
@@ -518,7 +575,7 @@ func (w *writer) writeChunk() error {
 	}
 	// if their is no sessionURI yet, obtain one by starting the session
 	if w.sessionURI == "" {
-		w.sessionURI, err = startSession(w.client, w.bucket, w.name)
+		w.sessionURI, err = startSession(w.client, w.bucket, w.name, w.storageHost)
 	}
 	if err != nil {
 		return err
@@ -562,7 +619,7 @@ func (w *writer) Size() int64 {
 }
 
 func (w *writer) init(path string) error {
-	res, err := getObject(w.client, w.bucket, w.name, 0)
+	res, err := getObject(w.client, w.bucket, w.name, 0, w.storageHost)
 	if err != nil {
 		return err
 	}
@@ -852,10 +909,10 @@ func (d *driver) Walk(ctx context.Context, path string, f storagedriver.WalkFn) 
 	return storagedriver.WalkFallback(ctx, d, path, f)
 }
 
-func startSession(client *http.Client, bucket string, name string) (uri string, err error) {
+func startSession(client *http.Client, bucket string, name string, storageHost string) (uri string, err error) {
 	u := &url.URL{
 		Scheme:   "https",
-		Host:     "www.googleapis.com",
+		Host:     storageHost,
 		Path:     fmt.Sprintf("/upload/storage/v1/b/%v/o", bucket),
 		RawQuery: fmt.Sprintf("uploadType=resumable&name=%v", name),
 	}
