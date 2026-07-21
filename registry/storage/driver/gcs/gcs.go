@@ -76,6 +76,7 @@ type driverParameters struct {
 	// pushes by ensuring we aren't DoSing our own server with many
 	// connections.
 	maxConcurrency uint64
+	storageHost    string
 }
 
 func init() {
@@ -101,6 +102,7 @@ type driver struct {
 	privateKey    []byte
 	rootDirectory string
 	chunkSize     int
+	storageHost   string
 }
 
 // Wrapper wraps `driver` with a throttler, ensuring that no more than N
@@ -157,6 +159,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 	var gcs *storage.Client
 	var options []option.ClientOption
 	var creds *google.Credentials
+	storageHost := "storage.googleapis.com"
 	if keyfile, ok := parameters["keyfile"]; ok {
 		jsonKey, err := os.ReadFile(fmt.Sprint(keyfile))
 		if err != nil {
@@ -166,8 +169,18 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		if err != nil {
 			return nil, err
 		}
+		ud, err := creds.GetUniverseDomain()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get universe domain: %w", err)
+		}
+		options = append(options, option.WithCredentialsJSON(jsonKey), option.WithUniverseDomain(ud))
+		if ud != "" && ud != "googleapis.com" {
+			options = append(options, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
+		}
 		ts = creds.TokenSource
-		options = append(options, option.WithCredentialsFile(fmt.Sprint(keyfile)))
+		if ud != "" {
+			storageHost = fmt.Sprintf("storage.%s", ud)
+		}
 	} else if credentials, ok := parameters["credentials"]; ok {
 		credentialMap, ok := credentials.(map[any]any)
 		if !ok {
@@ -192,8 +205,18 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		if err != nil {
 			return nil, err
 		}
+		ud, err := creds.GetUniverseDomain()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get universe domain: %w", err)
+		}
+		options = append(options, option.WithCredentialsJSON(data), option.WithUniverseDomain(ud))
+		if ud != "" && ud != "googleapis.com" {
+			options = append(options, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
+		}
 		ts = creds.TokenSource
-		options = append(options, option.WithCredentialsJSON(data))
+		if ud != "" {
+			storageHost = fmt.Sprintf("storage.%s", ud)
+		}
 	} else {
 		var err error
 		// DefaultTokenSource is a convenience method. It first calls FindDefaultCredentials,
@@ -234,6 +257,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		chunkSize:      chunkSize,
 		maxConcurrency: maxConcurrency,
 		gcs:            gcs,
+		storageHost:    storageHost,
 	}
 
 	return New(ctx, params)
@@ -255,6 +279,7 @@ func New(ctx context.Context, params driverParameters) (storagedriver.StorageDri
 		privateKey:    params.privateKey,
 		client:        params.client,
 		chunkSize:     params.chunkSize,
+		storageHost:   params.storageHost,
 	}
 
 	return &Wrapper{
@@ -818,9 +843,13 @@ func (d *driver) Walk(ctx context.Context, path string, f storagedriver.WalkFn, 
 }
 
 func (w *writer) newSession() (uri string, err error) {
+	host := "www.googleapis.com"
+	if w.driver.storageHost != "" {
+		host = w.driver.storageHost
+	}
 	u := &url.URL{
 		Scheme:   "https",
-		Host:     "www.googleapis.com",
+		Host:     host,
 		Path:     fmt.Sprintf("/upload/storage/v1/b/%v/o", w.object.BucketName()),
 		RawQuery: fmt.Sprintf("uploadType=resumable&name=%v", w.object.ObjectName()),
 	}
