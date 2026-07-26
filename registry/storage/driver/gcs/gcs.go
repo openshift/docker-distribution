@@ -160,6 +160,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 	var options []option.ClientOption
 	var creds *google.Credentials
 	storageHost := "storage.googleapis.com"
+	useSignedURLRedirects := false
 	if keyfile, ok := parameters["keyfile"]; ok {
 		jsonKey, err := os.ReadFile(fmt.Sprint(keyfile))
 		if err != nil {
@@ -187,6 +188,9 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		}
 		if ud != "" {
 			storageHost = fmt.Sprintf("storage.%s", ud)
+		}
+		if ud == "" || ud == "googleapis.com" {
+			useSignedURLRedirects = true
 		}
 	} else if credentials, ok := parameters["credentials"]; ok {
 		credentialMap, ok := credentials.(map[any]any)
@@ -231,6 +235,9 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		if ud != "" {
 			storageHost = fmt.Sprintf("storage.%s", ud)
 		}
+		if ud == "" || ud == "googleapis.com" {
+			useSignedURLRedirects = true
+		}
 	} else {
 		var err error
 		httpClient, _, err = htransport.NewClient(ctx, option.WithScopes(storage.ScopeFullControl))
@@ -254,21 +261,19 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 	if err != nil {
 		return nil, fmt.Errorf("maxconcurrency config error: %s", err)
 	}
-	var credsJSON []byte
-	if creds != nil {
-		credsJSON = creds.JSON
-	}
 
 	params := driverParameters{
 		bucket:         fmt.Sprint(bucket),
 		rootDirectory:  fmt.Sprint(rootDirectory),
 		client:         httpClient,
-		email:          getEmailFromCredentialsJSON(credsJSON),
-		privateKey:     getPrivateKeyFromCredentialsJSON(credsJSON),
 		chunkSize:      chunkSize,
 		maxConcurrency: maxConcurrency,
 		gcs:            gcs,
 		storageHost:    storageHost,
+	}
+	if useSignedURLRedirects && creds != nil {
+		params.email = getEmailFromCredentialsJSON(creds.JSON)
+		params.privateKey = getPrivateKeyFromCredentialsJSON(creds.JSON)
 	}
 
 	return New(ctx, params)
@@ -835,6 +840,9 @@ func (d *driver) Delete(ctx context.Context, path string) error {
 // the given path, possibly using the given options.
 func (d *driver) RedirectURL(r *http.Request, path string) (string, error) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return "", nil
+	}
+	if d.privateKey == nil || d.email == "" {
 		return "", nil
 	}
 
