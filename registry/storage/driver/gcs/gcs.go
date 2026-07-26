@@ -35,11 +35,11 @@ import (
 	"github.com/distribution/distribution/v3/registry/storage/driver/base"
 	"github.com/distribution/distribution/v3/registry/storage/driver/factory"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	htransport "google.golang.org/api/transport/http"
 )
 
 const (
@@ -154,7 +154,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		}
 	}
 
-	var ts oauth2.TokenSource
+	var httpClient *http.Client
 	var err error
 	var gcs *storage.Client
 	var options []option.ClientOption
@@ -173,11 +173,18 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		if err != nil {
 			return nil, fmt.Errorf("failed to get universe domain: %w", err)
 		}
-		options = append(options, option.WithCredentialsJSON(jsonKey), option.WithUniverseDomain(ud))
+		clientOpts := []option.ClientOption{
+			option.WithCredentialsJSON(jsonKey),
+			option.WithUniverseDomain(ud),
+		}
+		options = append(options, clientOpts...)
 		if ud != "" && ud != "googleapis.com" {
 			options = append(options, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
 		}
-		ts = creds.TokenSource
+		httpClient, _, err = htransport.NewClient(ctx, append(clientOpts, option.WithScopes(storage.ScopeFullControl))...)
+		if err != nil {
+			return nil, err
+		}
 		if ud != "" {
 			storageHost = fmt.Sprintf("storage.%s", ud)
 		}
@@ -209,20 +216,24 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		if err != nil {
 			return nil, fmt.Errorf("failed to get universe domain: %w", err)
 		}
-		options = append(options, option.WithCredentialsJSON(data), option.WithUniverseDomain(ud))
+		clientOpts := []option.ClientOption{
+			option.WithCredentialsJSON(data),
+			option.WithUniverseDomain(ud),
+		}
+		options = append(options, clientOpts...)
 		if ud != "" && ud != "googleapis.com" {
 			options = append(options, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
 		}
-		ts = creds.TokenSource
+		httpClient, _, err = htransport.NewClient(ctx, append(clientOpts, option.WithScopes(storage.ScopeFullControl))...)
+		if err != nil {
+			return nil, err
+		}
 		if ud != "" {
 			storageHost = fmt.Sprintf("storage.%s", ud)
 		}
 	} else {
 		var err error
-		// DefaultTokenSource is a convenience method. It first calls FindDefaultCredentials,
-		// then uses the credentials to construct an http.Client or an oauth2.TokenSource.
-		// https://pkg.go.dev/golang.org/x/oauth2/google#hdr-Credentials
-		ts, err = google.DefaultTokenSource(ctx, storage.ScopeFullControl)
+		httpClient, _, err = htransport.NewClient(ctx, option.WithScopes(storage.ScopeFullControl))
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +262,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 	params := driverParameters{
 		bucket:         fmt.Sprint(bucket),
 		rootDirectory:  fmt.Sprint(rootDirectory),
-		client:         oauth2.NewClient(ctx, ts),
+		client:         httpClient,
 		email:          getEmailFromCredentialsJSON(credsJSON),
 		privateKey:     getPrivateKeyFromCredentialsJSON(credsJSON),
 		chunkSize:      chunkSize,
