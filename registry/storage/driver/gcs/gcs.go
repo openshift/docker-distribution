@@ -162,6 +162,7 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 	var gcs *storage.Client
 	var creds *google.Credentials
 	storageHost := "storage.googleapis.com"
+	useSignedURLRedirects := false
 	if keyfile, ok := parameters["keyfile"]; ok {
 		jsonKey, err := os.ReadFile(fmt.Sprint(keyfile))
 		if err != nil {
@@ -192,6 +193,12 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 			return nil, err
 		}
 		storageHost = fmt.Sprintf("storage.%s", ud)
+		// For non-default universe domains, disable signed URL redirects.
+		// storage.SignedURL in older SDK versions generates URLs for
+		// storage.googleapis.com which don't work in sovereign clouds.
+		if ud == "googleapis.com" {
+			useSignedURLRedirects = true
+		}
 	} else if credentials, ok := parameters["credentials"]; ok {
 		credentialMap, ok := credentials.(map[interface{}]interface{})
 		if !ok {
@@ -237,6 +244,9 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 			return nil, err
 		}
 		storageHost = fmt.Sprintf("storage.%s", ud)
+		if ud == "googleapis.com" {
+			useSignedURLRedirects = true
+		}
 	} else {
 		var err error
 		httpClient, _, err = htransport.NewClient(ctx, option.WithScopes(storage.ScopeFullControl))
@@ -257,12 +267,14 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 		bucket:         fmt.Sprint(bucket),
 		rootDirectory:  fmt.Sprint(rootDirectory),
 		client:         httpClient,
-		email:          getEmailFromCredentialsJSON(creds.JSON),
-		privateKey:     getPrivateKeyFromCredentialsJSON(creds.JSON),
 		chunkSize:      chunkSize,
 		maxConcurrency: maxConcurrency,
 		gcs:            gcs,
 		storageHost:    storageHost,
+	}
+	if useSignedURLRedirects {
+		params.email = getEmailFromCredentialsJSON(creds.JSON)
+		params.privateKey = getPrivateKeyFromCredentialsJSON(creds.JSON)
 	}
 
 	return New(params)
@@ -335,33 +347,39 @@ func (d *driver) PutContent(ctx context.Context, path string, contents []byte) e
 // with a given byte offset.
 // May be used to resume reading a stream by providing a nonzero offset.
 func (d *driver) Reader(ctx context.Context, path string, offset int64) (io.ReadCloser, error) {
-	res, err := getObject(d.client, d.bucket, d.pathToKey(path), offset, d.storageHost)
-	if err != nil {
-		if res != nil {
-			if res.StatusCode == http.StatusNotFound {
-				res.Body.Close()
-				return nil, storagedriver.PathNotFoundError{Path: path}
-			}
+	name := d.pathToKey(path)
+	obj := d.gcs.Bucket(d.bucket).Object(name)
 
-			if res.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-				res.Body.Close()
-				obj, err := d.storageStatObject(ctx, path)
-				if err != nil {
-					return nil, err
-				}
-				if offset == int64(obj.Size) {
-					return io.NopCloser(bytes.NewReader([]byte{})), nil
-				}
-				return nil, storagedriver.InvalidOffsetError{Path: path, Offset: offset}
-			}
-		}
-		return nil, err
-	}
-	if res.Header.Get("Content-Type") == uploadSessionContentType {
-		defer res.Body.Close()
+	attrs, err := obj.Attrs(ctx)
+	if err == storage.ErrObjectNotExist {
 		return nil, storagedriver.PathNotFoundError{Path: path}
 	}
-	return res.Body, nil
+	if err != nil {
+		return nil, err
+	}
+	if attrs.ContentType == uploadSessionContentType {
+		return nil, storagedriver.PathNotFoundError{Path: path}
+	}
+
+	if offset > 0 && offset >= attrs.Size {
+		if offset == attrs.Size {
+			return io.NopCloser(bytes.NewReader([]byte{})), nil
+		}
+		return nil, storagedriver.InvalidOffsetError{Path: path, Offset: offset}
+	}
+
+	length := int64(-1)
+	if offset > 0 {
+		length = attrs.Size - offset
+	}
+	rc, err := obj.NewRangeReader(ctx, offset, length)
+	if err == storage.ErrObjectNotExist {
+		return nil, storagedriver.PathNotFoundError{Path: path}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rc, nil
 }
 
 func getObject(client *http.Client, bucket string, name string, offset int64, storageHost string) (*http.Response, error) {
