@@ -33,19 +33,17 @@ import (
 	"strings"
 	"time"
 
-	"cloud.google.com/go/auth/credentials"
-	"cloud.google.com/go/auth/oauth2adapt"
 	"cloud.google.com/go/storage"
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/distribution/v3/registry/storage/driver/base"
 	"github.com/distribution/distribution/v3/registry/storage/driver/factory"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"golang.org/x/oauth2/jwt"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	htransport "google.golang.org/api/transport/http"
 )
 
 const (
@@ -119,30 +117,6 @@ type baseEmbed struct {
 	base.Base
 }
 
-// selfSignedTokenSource returns an oauth2.TokenSource that uses self-signed JWTs
-// for non-default universe domains, avoiding the need for the OAuth2 token endpoint.
-// For the default universe domain (googleapis.com), it falls back to the standard
-// credential token source.
-func selfSignedTokenSource(credJSON []byte, universeDomain string) (oauth2.TokenSource, error) {
-	if universeDomain == "" || universeDomain == "googleapis.com" {
-		creds, err := google.CredentialsFromJSON(context.Background(), credJSON, storage.ScopeFullControl)
-		if err != nil {
-			return nil, err
-		}
-		return creds.TokenSource, nil
-	}
-	authCreds, err := credentials.DetectDefault(&credentials.DetectOptions{
-		CredentialsJSON:  credJSON,
-		Scopes:           []string{storage.ScopeFullControl},
-		UseSelfSignedJWT: true,
-		UniverseDomain:   universeDomain,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect credentials for universe domain %s: %w", universeDomain, err)
-	}
-	return oauth2adapt.TokenSourceFromTokenProvider(authCreds.TokenProvider), nil
-}
-
 // FromParameters constructs a new Driver with a given parameters map
 // Required parameters:
 // - bucket
@@ -183,7 +157,7 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 		}
 	}
 
-	var ts oauth2.TokenSource
+	var httpClient *http.Client
 	var err error
 	var gcs *storage.Client
 	var creds *google.Credentials
@@ -201,16 +175,19 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 		if err != nil {
 			return nil, fmt.Errorf("failed to get universe domain: %w", err)
 		}
-		storageOpts := []option.ClientOption{option.WithCredentialsJSON(jsonKey)}
+		clientOpts := []option.ClientOption{
+			option.WithCredentialsJSON(jsonKey),
+			option.WithUniverseDomain(ud),
+		}
+		storageOpts := append([]option.ClientOption{}, clientOpts...)
 		if ud != "googleapis.com" {
 			storageOpts = append(storageOpts, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
 		}
-		storageOpts = append(storageOpts, option.WithUniverseDomain(ud))
 		gcs, err = storage.NewClient(ctx, storageOpts...)
 		if err != nil {
 			return nil, err
 		}
-		ts, err = selfSignedTokenSource(jsonKey, ud)
+		httpClient, _, err = htransport.NewClient(ctx, append(clientOpts, option.WithScopes(storage.ScopeFullControl))...)
 		if err != nil {
 			return nil, err
 		}
@@ -243,23 +220,26 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 		if err != nil {
 			return nil, fmt.Errorf("failed to get universe domain: %w", err)
 		}
-		storageOpts := []option.ClientOption{option.WithCredentialsJSON(data)}
+		clientOpts := []option.ClientOption{
+			option.WithCredentialsJSON(data),
+			option.WithUniverseDomain(ud),
+		}
+		storageOpts := append([]option.ClientOption{}, clientOpts...)
 		if ud != "googleapis.com" {
 			storageOpts = append(storageOpts, option.WithEndpoint(fmt.Sprintf("https://storage.%s/storage/v1/", ud)))
 		}
-		storageOpts = append(storageOpts, option.WithUniverseDomain(ud))
 		gcs, err = storage.NewClient(ctx, storageOpts...)
 		if err != nil {
 			return nil, err
 		}
-		ts, err = selfSignedTokenSource(data, ud)
+		httpClient, _, err = htransport.NewClient(ctx, append(clientOpts, option.WithScopes(storage.ScopeFullControl))...)
 		if err != nil {
 			return nil, err
 		}
 		storageHost = fmt.Sprintf("storage.%s", ud)
 	} else {
 		var err error
-		ts, err = google.DefaultTokenSource(ctx, storage.ScopeFullControl)
+		httpClient, _, err = htransport.NewClient(ctx, option.WithScopes(storage.ScopeFullControl))
 		if err != nil {
 			return nil, err
 		}
@@ -276,7 +256,7 @@ func FromParameters(parameters map[string]interface{}) (storagedriver.StorageDri
 	params := driverParameters{
 		bucket:         fmt.Sprint(bucket),
 		rootDirectory:  fmt.Sprint(rootDirectory),
-		client:         oauth2.NewClient(ctx, ts),
+		client:         httpClient,
 		email:          getEmailFromCredentialsJSON(creds.JSON),
 		privateKey:     getPrivateKeyFromCredentialsJSON(creds.JSON),
 		chunkSize:      chunkSize,
