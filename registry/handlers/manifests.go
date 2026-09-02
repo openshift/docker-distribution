@@ -14,6 +14,7 @@ import (
 	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/distribution/distribution/v3/manifest/manifestlist"
 	"github.com/distribution/distribution/v3/manifest/ocischema"
+	"github.com/distribution/distribution/v3/manifest/schema1" //nolint:staticcheck // schema1 support is retained for backward compatibility.
 	"github.com/distribution/distribution/v3/manifest/schema2"
 	"github.com/distribution/distribution/v3/registry/api/errcode"
 	"github.com/distribution/distribution/v3/registry/storage"
@@ -35,11 +36,12 @@ const (
 type storageType int
 
 const (
-	manifestSchema2     storageType = iota // 0
-	manifestlistSchema                     // 1
-	ociSchema                              // 2
-	ociImageIndexSchema                    // 3
-	numStorageTypes                        // 4
+	manifestSchema1     storageType = iota // 0
+	manifestSchema2                        // 1
+	manifestlistSchema                     // 2
+	ociSchema                              // 3
+	ociImageIndexSchema                    // 4
+	numStorageTypes                        // 5
 )
 
 // manifestDispatcher takes the request context and builds the
@@ -102,6 +104,9 @@ func (imh *manifestHandler) GetManifest(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 
+			if mediaType == schema1.MediaTypeManifest || mediaType == schema1.MediaTypeSignedManifest { //nolint:staticcheck // schema1 support is retained for backward compatibility.
+				supports[manifestSchema1] = true
+			}
 			if mediaType == schema2.MediaTypeManifest {
 				supports[manifestSchema2] = true
 			}
@@ -149,10 +154,13 @@ func (imh *manifestHandler) GetManifest(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
-	// determine the type of the returned manifest
-	manifestType := manifestSchema2
+	// Determine the type of the returned manifest.
+	manifestType := manifestSchema1
+	schema2Manifest, isSchema2 := manifest.(*schema2.DeserializedManifest)
 	manifestList, isManifestList := manifest.(*manifestlist.DeserializedManifestList)
-	if _, isOCImanifest := manifest.(*ocischema.DeserializedManifest); isOCImanifest {
+	if isSchema2 {
+		manifestType = manifestSchema2
+	} else if _, isOCImanifest := manifest.(*ocischema.DeserializedManifest); isOCImanifest {
 		manifestType = ociSchema
 	} else if isManifestList {
 		switch manifestList.MediaType {
@@ -172,12 +180,17 @@ func (imh *manifestHandler) GetManifest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if imh.Tag != "" && manifestType == manifestlistSchema && !supports[manifestlistSchema] {
-		// Rewrite manifest in schema1 format
+	// Only rewrite manifests fetched by tag. A response fetched by digest must
+	// retain the requested digest.
+	if imh.Tag != "" && manifestType == manifestSchema2 && !supports[manifestSchema2] {
+		dcontext.GetLogger(imh).Infof("rewriting manifest %s in schema1 format to support old client", imh.Digest.String())
+		manifest, err = imh.convertSchema2Manifest(schema2Manifest)
+		if err != nil {
+			return
+		}
+	} else if imh.Tag != "" && manifestType == manifestlistSchema && !supports[manifestlistSchema] {
 		dcontext.GetLogger(imh).Infof("rewriting manifest list %s in schema1 format to support old client", imh.Digest.String())
 
-		// Find the image manifest corresponding to the default
-		// platform
 		var manifestDigest digest.Digest
 		for _, manifestDescriptor := range manifestList.Manifests {
 			if manifestDescriptor.Platform.Architecture == defaultArch && manifestDescriptor.Platform.OS == defaultOS {
@@ -185,7 +198,6 @@ func (imh *manifestHandler) GetManifest(w http.ResponseWriter, r *http.Request) 
 				break
 			}
 		}
-
 		if manifestDigest == "" {
 			imh.Errors = append(imh.Errors, errcode.ErrorCodeManifestUnknown)
 			return
@@ -201,9 +213,11 @@ func (imh *manifestHandler) GetManifest(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		if _, isSchema2 := manifest.(*schema2.DeserializedManifest); isSchema2 && !supports[manifestSchema2] {
-			imh.Errors = append(imh.Errors, errcode.ErrorCodeManifestInvalid.WithMessage("Schema 2 manifest not supported by client"))
-			return
+		if schema2Manifest, isSchema2 := manifest.(*schema2.DeserializedManifest); isSchema2 && !supports[manifestSchema2] {
+			manifest, err = imh.convertSchema2Manifest(schema2Manifest)
+			if err != nil {
+				return
+			}
 		} else {
 			imh.Digest = manifestDigest
 		}
@@ -227,6 +241,44 @@ func (imh *manifestHandler) GetManifest(w http.ResponseWriter, r *http.Request) 
 	if _, err := w.Write(p); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
+}
+
+func (imh *manifestHandler) convertSchema2Manifest(schema2Manifest *schema2.DeserializedManifest) (distribution.Manifest, error) {
+	targetDescriptor := schema2Manifest.Target()
+	configJSON, err := imh.Repository.Blobs(imh).Get(imh, targetDescriptor.Digest)
+	if err != nil {
+		if err == distribution.ErrBlobUnknown {
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeManifestInvalid.WithDetail(err))
+		} else {
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeUnknown.WithDetail(err))
+		}
+		return nil, err
+	}
+
+	ref := imh.Repository.Named()
+	if imh.Tag != "" {
+		ref, err = reference.WithTag(ref, imh.Tag)
+		if err != nil {
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeTagInvalid.WithDetail(err))
+			return nil, err
+		}
+	}
+
+	builder := schema1.NewConfigManifestBuilder(imh.Repository.Blobs(imh), imh.App.trustKey, ref, configJSON) //nolint:staticcheck // schema1 support is retained for backward compatibility.
+	for _, descriptor := range schema2Manifest.Layers {
+		if err := builder.AppendReference(descriptor); err != nil {
+			imh.Errors = append(imh.Errors, errcode.ErrorCodeManifestInvalid.WithDetail(err))
+			return nil, err
+		}
+	}
+
+	converted, err := builder.Build(imh)
+	if err != nil {
+		imh.Errors = append(imh.Errors, errcode.ErrorCodeManifestInvalid.WithDetail(err))
+		return nil, err
+	}
+	imh.Digest = digest.FromBytes(converted.(*schema1.SignedManifest).Canonical) //nolint:staticcheck // schema1 support is retained for backward compatibility.
+	return converted, nil
 }
 
 func etagMatch(r *http.Request, etag string) bool {
@@ -373,6 +425,8 @@ func (imh *manifestHandler) applyResourcePolicy(manifest distribution.Manifest) 
 
 	var class string
 	switch m := manifest.(type) {
+	case *schema1.SignedManifest: //nolint:staticcheck // schema1 support is retained for backward compatibility.
+		class = imageClass
 	case *schema2.DeserializedManifest:
 		switch m.Config.MediaType {
 		case schema2.MediaTypeImageConfig:

@@ -1476,7 +1476,10 @@ func TestManifestAPI_DeleteTag_DeleteDisabled(t *testing.T) {
 	checkBodyHasErrorCodes(t, msg, resp, errcode.ErrorCodeUnsupported)
 
 	msg = "checking tag exists after rejected delete"
-	resp, err = http.Get(u)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	checkErr(t, err, msg)
+	req.Header.Set("Accept", schema2.MediaTypeManifest)
+	resp, err = http.DefaultClient.Do(req)
 	checkErr(t, err, msg)
 	defer resp.Body.Close()
 	checkResponse(t, msg, resp, http.StatusOK)
@@ -1805,6 +1808,7 @@ func testManifestAPISchema2(t *testing.T, env *testEnv, imageName reference.Name
 	if err != nil {
 		t.Fatalf("Error constructing request: %s", err)
 	}
+	headReq.Header.Set("Accept", schema2.MediaTypeManifest)
 	headResp, err := http.DefaultClient.Do(headReq)
 	if err != nil {
 		t.Fatalf("unexpected error head manifest: %v", err)
@@ -1875,6 +1879,7 @@ func testManifestAPISchema2(t *testing.T, env *testEnv, imageName reference.Name
 	if err != nil {
 		t.Fatalf("Error constructing request: %s", err)
 	}
+	headReq.Header.Set("Accept", schema2.MediaTypeManifest)
 	headResp, err = http.DefaultClient.Do(headReq)
 	if err != nil {
 		t.Fatalf("unexpected error head manifest: %v", err)
@@ -2935,7 +2940,10 @@ func TestProxyManifestGetByTag(t *testing.T) {
 	manifestTagURL, err := proxyEnv.builder.BuildManifestURL(tagRef)
 	checkErr(t, err, "building manifest url")
 
-	resp, err = http.Get(manifestTagURL)
+	req, err := http.NewRequest(http.MethodGet, manifestTagURL, nil)
+	checkErr(t, err, "building proxy manifest request")
+	req.Header.Set("Accept", schema2.MediaTypeManifest)
+	resp, err = http.DefaultClient.Do(req)
 	checkErr(t, err, "fetching manifest from proxy by tag (error check 1)")
 	defer resp.Body.Close()
 	checkResponse(t, "fetching manifest from proxy by tag (response check 1)", resp, http.StatusOK)
@@ -2950,7 +2958,10 @@ func TestProxyManifestGetByTag(t *testing.T) {
 	}
 
 	// fetch it with the same proxy URL as before.  Ensure the updated content is at the same tag
-	resp, err = http.Get(manifestTagURL)
+	req, err = http.NewRequest(http.MethodGet, manifestTagURL, nil)
+	checkErr(t, err, "building updated proxy manifest request")
+	req.Header.Set("Accept", schema2.MediaTypeManifest)
+	resp, err = http.DefaultClient.Do(req)
 	checkErr(t, err, "fetching manifest from proxy by tag (error check 2)")
 	defer resp.Body.Close()
 	checkResponse(t, "fetching manifest from proxy by tag (response check 2)", resp, http.StatusOK)

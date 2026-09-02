@@ -8,6 +8,7 @@ import (
 
 	"github.com/distribution/distribution/v3"
 	"github.com/distribution/distribution/v3/internal/dcontext"
+	"github.com/distribution/distribution/v3/manifest/schema1" //nolint:staticcheck // schema1 support is retained for backward compatibility.
 	"github.com/distribution/distribution/v3/manifest/schema2"
 	"github.com/opencontainers/go-digest"
 )
@@ -109,7 +110,7 @@ func (ms *schema2ManifestHandler) verifyManifest(ctx context.Context, mnfst sche
 					break
 				}
 			}
-		case schema2.MediaTypeManifest:
+		case schema2.MediaTypeManifest, schema1.MediaTypeManifest: //nolint:staticcheck // schema1 support is retained for backward compatibility.
 			var exists bool
 			exists, err = manifestService.Exists(ctx, descriptor.Digest)
 			if err != nil || !exists {

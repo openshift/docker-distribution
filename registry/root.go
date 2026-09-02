@@ -8,6 +8,7 @@ import (
 	"github.com/distribution/distribution/v3/registry/storage"
 	"github.com/distribution/distribution/v3/registry/storage/driver/factory"
 	"github.com/distribution/distribution/v3/version"
+	"github.com/docker/libtrust"
 	"github.com/spf13/cobra"
 )
 
@@ -70,7 +71,13 @@ var GCCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		registry, err := storage.NewRegistry(ctx, driver)
+		key, err := libtrust.GenerateECP256PrivateKey()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to generate schema1 signing key: %v", err)
+			os.Exit(1)
+		}
+
+		registry, err := storage.NewRegistry(ctx, driver, storage.Schema1SigningKey(key))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to construct registry: %v", err)
 			os.Exit(1)

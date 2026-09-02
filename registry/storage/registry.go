@@ -9,6 +9,7 @@ import (
 	"github.com/distribution/distribution/v3/registry/storage/cache"
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/reference"
+	"github.com/docker/libtrust"
 )
 
 var (
@@ -24,6 +25,8 @@ type registry struct {
 	blobDescriptorCacheProvider  cache.BlobDescriptorCacheProvider
 	deleteEnabled                bool
 	tagLookupConcurrencyLimit    int
+	schema1Enabled               bool
+	schema1SigningKey            libtrust.PrivateKey
 	resumableDigestEnabled       bool
 	blobDescriptorServiceFactory distribution.BlobDescriptorServiceFactory
 	driver                       storagedriver.StorageDriver
@@ -77,6 +80,13 @@ func EnableDelete(registry *registry) error {
 	return nil
 }
 
+// EnableSchema1 is a functional option for NewRegistry. It enables pushing
+// schema1 manifests.
+func EnableSchema1(registry *registry) error {
+	registry.schema1Enabled = true
+	return nil
+}
+
 // DisableDigestResumption is a functional option for NewRegistry. It should be
 // used if the registry is acting as a caching proxy.
 func DisableDigestResumption(registry *registry) error {
@@ -118,6 +128,15 @@ func AddValidateImageIndexImagesExistPlatform(architecture string, os string) Re
 				os:           os,
 			},
 		)
+		return nil
+	}
+}
+
+// Schema1SigningKey returns a functional option for NewRegistry that sets the
+// key used to sign schema1 manifests converted for legacy clients.
+func Schema1SigningKey(key libtrust.PrivateKey) RegistryOption {
+	return func(registry *registry) error {
+		registry.schema1SigningKey = key
 		return nil
 	}
 }
@@ -283,6 +302,23 @@ func (repo *repository) Manifests(ctx context.Context, options ...distribution.M
 		linkDirectoryPathSpec: manifestDirectoryPathSpec,
 	}
 
+	schema1Handler := ManifestHandler(&v1UnsupportedHandler{
+		innerHandler: &signedManifestHandler{
+			ctx:               ctx,
+			schema1SigningKey: repo.schema1SigningKey,
+			repository:        repo,
+			blobStore:         blobStore,
+		},
+	})
+	if repo.schema1Enabled {
+		schema1Handler = &signedManifestHandler{
+			ctx:               ctx,
+			schema1SigningKey: repo.schema1SigningKey,
+			repository:        repo,
+			blobStore:         blobStore,
+		}
+	}
+
 	manifestListHandler := &manifestListHandler{
 		ctx:                  ctx,
 		repository:           repo,
@@ -291,9 +327,10 @@ func (repo *repository) Manifests(ctx context.Context, options ...distribution.M
 	}
 
 	ms := &manifestStore{
-		ctx:        ctx,
-		repository: repo,
-		blobStore:  blobStore,
+		ctx:            ctx,
+		repository:     repo,
+		blobStore:      blobStore,
+		schema1Handler: schema1Handler,
 		schema2Handler: &schema2ManifestHandler{
 			ctx:          ctx,
 			repository:   repo,

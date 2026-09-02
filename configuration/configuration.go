@@ -73,11 +73,32 @@ type Configuration struct {
 	// Proxy defines the configuration options for using the registry as a pull-through cache.
 	Proxy Proxy `yaml:"proxy,omitempty"`
 
+	// Compatibility configures support for older or deprecated features.
+	Compatibility Compatibility `yaml:"compatibility,omitempty"`
+
 	// Validation configures validation options for the registry.
 	Validation Validation `yaml:"validation,omitempty"`
 
 	// Policy configures registry policy options.
 	Policy Policy `yaml:"policy,omitempty"`
+}
+
+// Compatibility configures support for older or deprecated features.
+type Compatibility struct {
+	// Schema1 configures Docker Image Manifest v2, Schema 1 compatibility.
+	Schema1 Schema1Compatibility `yaml:"schema1,omitempty"`
+}
+
+// Schema1Compatibility configures Docker Image Manifest v2, Schema 1 support.
+//
+// Deprecated: Schema 1 has been deprecated since 2015. Use only for backward
+// compatibility with clients that cannot use Schema 2 or OCI manifests.
+type Schema1Compatibility struct {
+	// TrustKey is the private key used to sign manifests converted to Schema 1.
+	TrustKey string `yaml:"signingkeyfile,omitempty"`
+
+	// Enabled allows clients to push Schema 1 manifests.
+	Enabled bool `yaml:"enabled,omitempty"`
 }
 
 // Policy defines configuration options for managing registry policies.

@@ -1283,6 +1283,28 @@ to retrieve the credentials to authenticate with the upstream registry.
 > **Note**: These private repositories are stored in the proxy cache's storage.
 > Take appropriate measures to protect access to the proxy cache.
 
+## `compatibility`
+
+```yaml
+compatibility:
+  schema1:
+    signingkeyfile: /etc/distribution/schema1.key
+    enabled: true
+```
+
+The `compatibility` section enables deprecated behavior required by legacy
+clients.
+
+### `schema1`
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `signingkeyfile` | no | Private key used to sign manifests converted to Schema 1. When omitted, the registry generates an ephemeral ECDSA key at startup. |
+| `enabled` | no | Allows Schema 1 manifest uploads. Schema 1 pulls and conversion for legacy clients remain available when this is `false`. |
+
+Schema 1 has been deprecated since 2015. Enable uploads only while clients that
+cannot use Schema 2 or OCI manifests remain supported.
+
 ## `validation`
 
 ```yaml

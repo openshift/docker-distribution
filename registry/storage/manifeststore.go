@@ -9,6 +9,7 @@ import (
 	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/distribution/distribution/v3/manifest/manifestlist"
 	"github.com/distribution/distribution/v3/manifest/ocischema"
+	"github.com/distribution/distribution/v3/manifest/schema1" //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
 	"github.com/distribution/distribution/v3/manifest/schema2"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
@@ -47,6 +48,7 @@ type manifestStore struct {
 
 	skipDependencyVerification bool
 
+	schema1Handler        ManifestHandler
 	schema2Handler        ManifestHandler
 	manifestListHandler   ManifestHandler
 	ocischemaHandler      ManifestHandler
@@ -100,6 +102,8 @@ func (ms *manifestStore) Get(ctx context.Context, dgst digest.Digest, options ..
 	}
 
 	switch versioned.SchemaVersion {
+	case 1:
+		return ms.schema1Handler.Unmarshal(ctx, dgst, content)
 	case 2:
 		// This can be an image manifest or a manifest list
 		switch versioned.MediaType {
@@ -135,6 +139,8 @@ func (ms *manifestStore) Put(ctx context.Context, manifest distribution.Manifest
 	dcontext.GetLogger(ms.ctx).Debug("(*manifestStore).Put")
 
 	switch manifest.(type) {
+	case *schema1.SignedManifest: //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
+		return ms.schema1Handler.Put(ctx, manifest, ms.skipDependencyVerification)
 	case *schema2.DeserializedManifest:
 		return ms.schema2Handler.Put(ctx, manifest, ms.skipDependencyVerification)
 	case *ocischema.DeserializedManifest:

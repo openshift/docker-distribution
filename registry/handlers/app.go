@@ -43,6 +43,7 @@ import (
 	"github.com/distribution/reference"
 	events "github.com/docker/go-events"
 	"github.com/docker/go-metrics"
+	"github.com/docker/libtrust"
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
@@ -69,6 +70,7 @@ type App struct {
 	registry         distribution.Namespace         // registry is the primary registry backend for the app instance.
 	repoRemover      distribution.RepositoryRemover // repoRemover provides ability to delete repos
 	accessController auth.AccessController          // main access controller for application
+	trustKey         libtrust.PrivateKey
 
 	// httpHost is a parsed representation of the http.host parameter from
 	// the configuration. Only the Scheme and Host fields are used.
@@ -171,6 +173,23 @@ func NewApp(ctx context.Context, config *configuration.Configuration) *App {
 	app.configureLogHook(config)
 
 	options := registrymiddleware.GetRegistryOptions()
+
+	if config.Compatibility.Schema1.TrustKey != "" {
+		app.trustKey, err = libtrust.LoadKeyFile(config.Compatibility.Schema1.TrustKey)
+		if err != nil {
+			panic(fmt.Sprintf(`could not load schema1 "signingkeyfile" parameter: %v`, err))
+		}
+	} else {
+		// Generate an ephemeral key for manifests converted for legacy clients.
+		app.trustKey, err = libtrust.GenerateECP256PrivateKey()
+		if err != nil {
+			panic(err)
+		}
+	}
+	options = append(options, storage.Schema1SigningKey(app.trustKey))
+	if config.Compatibility.Schema1.Enabled {
+		options = append(options, storage.EnableSchema1)
+	}
 
 	if config.HTTP.Host != "" {
 		u, err := url.Parse(config.HTTP.Host)
