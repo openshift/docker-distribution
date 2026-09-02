@@ -243,6 +243,9 @@ github.com/docker/go-events
 # github.com/docker/go-metrics v0.0.1
 ## explicit; go 1.11
 github.com/docker/go-metrics
+# github.com/docker/libtrust v0.0.0-20160708172513-aabc10ec26b7
+## explicit
+github.com/docker/libtrust
 # github.com/envoyproxy/go-control-plane/envoy v1.36.0
 ## explicit; go 1.23.0
 github.com/envoyproxy/go-control-plane/envoy/admin/v3
