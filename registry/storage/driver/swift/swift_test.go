@@ -228,6 +228,45 @@ func TestFilenameChunking(t *testing.T) {
 	}
 }
 
+func TestSwiftVersionAtLeast(t *testing.T) {
+	tests := []struct {
+		version        string
+		major, minor, patch int
+		want           bool
+	}{
+		// OpenStack Swift versions
+		{"2.3.0", 2, 3, 0, true},    // exact match
+		{"2.27.0", 2, 3, 0, true},   // newer minor
+		{"2.3.1", 2, 3, 0, true},    // newer patch
+		{"2.2.0", 2, 3, 0, false},   // older minor
+		{"2.2.9", 2, 3, 0, false},   // older minor, higher patch
+		{"1.0.0", 2, 3, 0, false},   // ancient Swift
+
+		// Ceph RGW versions (must all be false)
+		{"20.2.3", 2, 3, 0, false},  // Ceph Squid
+		{"17.2.7", 2, 3, 0, false},  // Ceph Quincy
+		{"18.2.0", 2, 3, 0, false},  // Ceph Reef
+		{"19.2.1", 2, 3, 0, false},  // Ceph Squid RC
+
+		// Edge cases
+		{"", 2, 3, 0, false},        // empty string
+		{"invalid", 2, 3, 0, false}, // garbage
+		{"2", 2, 3, 0, false},       // single component
+		{"2.3", 2, 3, 0, true},      // two components, treated as 2.3.0
+		{"2.3", 2, 3, 1, false},     // two components < 2.3.1
+		{"2.x.0", 2, 3, 0, false},   // non-numeric minor
+		{"2.3.x", 2, 3, 0, false},   // non-numeric patch
+	}
+
+	for _, tt := range tests {
+		got := swiftVersionAtLeast(tt.version, tt.major, tt.minor, tt.patch)
+		if got != tt.want {
+			t.Errorf("swiftVersionAtLeast(%q, %d, %d, %d) = %v, want %v",
+				tt.version, tt.major, tt.minor, tt.patch, got, tt.want)
+		}
+	}
+}
+
 func TestSwiftSegmentPath(t *testing.T) {
 	d := &driver{
 		Prefix: "/test/segment/path",

@@ -244,7 +244,13 @@ func New(params Parameters) (*Driver, error) {
 		_, d.BulkDeleteSupport = config["bulk_delete"]
 
 		if err := mapstructure.Decode(config, &info); err == nil {
-			d.TempURLContainerKey = info.Swift.Version >= "2.3.0"
+			// Container-level TempURL keys are only supported on OpenStack
+			// Swift >= 2.3.0. Ceph RGW also exposes the /info endpoint but
+			// reports the Ceph version (e.g. "20.2.3") rather than a Swift
+			// version and does not validate container-level TempURL keys.
+			// swiftVersionAtLeast performs a numeric comparison and requires
+			// major version 2, which safely excludes Ceph RGW (major >= 13).
+			d.TempURLContainerKey = swiftVersionAtLeast(info.Swift.Version, 2, 3, 0)
 			d.TempURLMethods = info.Tempurl.Methods
 			if d.BulkDeleteSupport {
 				d.BulkDeleteMaxDeletes = info.BulkDelete.MaxDeletesPerRequest
@@ -782,6 +788,61 @@ func generateSecret() (string, error) {
 		return "", fmt.Errorf("could not generate random bytes for Swift secret key: %v", err)
 	}
 	return hex.EncodeToString(secretBytes[:]), nil
+}
+
+// swiftVersionAtLeast reports whether the Swift version string returned by
+// the /info endpoint represents an OpenStack Swift release >= major.minor.patch.
+//
+// The function requires the major version to match exactly rather than using a
+// simple numeric >= comparison. This is safe because:
+//
+//   - All OpenStack Swift releases use major version 2 (from the earliest
+//     releases through at least 2.38.x in the 2026.2 cycle). The feature
+//     this guards (container-level TempURL keys) was introduced in 2.3.0.
+//
+//   - Ceph RGW exposes a Swift-compatible /info endpoint but populates
+//     the "swift.version" field with the Ceph build version (via the
+//     CEPH_GIT_NICE_VER macro in rgw_rest_swift.cc). Ceph versions use
+//     major versions >= 13 (e.g. 17.2.7 Quincy, 18.2.0 Reef, 20.2.3
+//     Squid). Ceph RGW does not support container-level TempURL key
+//     validation — it only checks account-level keys.
+//
+// Because the two version spaces do not overlap (Swift == 2, Ceph >= 13),
+// requiring major == 2 cleanly identifies real OpenStack Swift and avoids
+// false positives from Ceph RGW. The safe default on mismatch is false
+// (use account-level keys), which works on both backends.
+func swiftVersionAtLeast(version string, major, minor, patch int) bool {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+
+	parsedMajor, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	if parsedMajor != major {
+		return false
+	}
+
+	parsedMinor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	if parsedMinor != minor {
+		return parsedMinor > minor
+	}
+
+	if len(parts) < 3 {
+		// e.g. "2.3" — treat as "2.3.0"
+		return patch == 0
+	}
+
+	parsedPatch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return false
+	}
+	return parsedPatch >= patch
 }
 
 func getSegmentPath(segmentsPath string, partNumber int) string {
