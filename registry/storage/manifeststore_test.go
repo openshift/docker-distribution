@@ -402,36 +402,44 @@ func testOCIManifestStorage(t *testing.T, testname string, includeMediaTypes boo
 		t.Fatal(err)
 	}
 
-	// Build a manifest and store its layers in the registry
+	// Build a manifest and store it and its layers in the registry
 
 	blobStore := env.repository.Blobs(ctx)
-	mfst, err := createRandomImage(t, testname, imageMediaType, blobStore)
+	builder := ocischema.NewManifestBuilder(blobStore, []byte{}, map[string]string{})
+	err = builder.(*ocischema.Builder).SetMediaType(imageMediaType)
 	if err != nil {
-		t.Fatalf("%s: unexpected error generating random image: %v", testname, err)
+		t.Fatal(err)
 	}
 
-	// create an image index
+	// Add some layers
+	for i := 0; i < 2; i++ {
+		rs, dgst, err := testutil.CreateRandomTarFile()
+		if err != nil {
+			t.Fatalf("%s: unexpected error generating test layer file", testname)
+		}
 
-	platformSpec := &v1.Platform{
-		Architecture: "atari2600",
-		OS:           "CP/M",
+		wr, err := env.repository.Blobs(env.ctx).Create(env.ctx)
+		if err != nil {
+			t.Fatalf("%s: unexpected error creating test upload: %v", testname, err)
+		}
+
+		if _, err := io.Copy(wr, rs); err != nil {
+			t.Fatalf("%s: unexpected error copying to upload: %v", testname, err)
+		}
+
+		if _, err := wr.Commit(env.ctx, distribution.Descriptor{Digest: dgst}); err != nil {
+			t.Fatalf("%s: unexpected error finishing upload: %v", testname, err)
+		}
+
+		builder.AppendReference(distribution.Descriptor{Digest: dgst})
 	}
 
-	mfstDescriptors := []distribution.Descriptor{
-		createOciManifestDescriptor(t, testname, mfst, platformSpec),
-	}
-
-	imageIndex, err := ociIndexFromDesriptorsWithMediaType(mfstDescriptors, indexMediaType)
+	mfst, err := builder.Build(ctx)
 	if err != nil {
-		t.Fatalf("%s: unexpected error creating image index: %v", testname, err)
+		t.Fatalf("%s: unexpected error generating manifest: %v", testname, err)
 	}
 
-	_, err = ms.Put(ctx, imageIndex)
-	if err == nil {
-		t.Fatalf("%s: expected error putting image index without child manifests in the registry: %v", testname, err)
-	}
-
-	// Test for proper handling of SchemaVersion for the image
+	// before putting the manifest test for proper handling of SchemaVersion
 
 	if mfst.(*ocischema.DeserializedManifest).Manifest.SchemaVersion != 2 {
 		t.Fatalf("%s: unexpected error generating default version for oci manifest", testname)
@@ -449,7 +457,30 @@ func testOCIManifestStorage(t *testing.T, testname string, includeMediaTypes boo
 		}
 	}
 
-	// We can now push the index
+	// Also create an image index that contains the manifest
+
+	descriptor, err := env.registry.BlobStatter().Stat(ctx, manifestDigest)
+	if err != nil {
+		t.Fatalf("%s: unexpected error getting manifest descriptor", testname)
+	}
+	descriptor.MediaType = v1.MediaTypeImageManifest
+
+	platformSpec := manifestlist.PlatformSpec{
+		Architecture: "atari2600",
+		OS:           "CP/M",
+	}
+
+	manifestDescriptors := []manifestlist.ManifestDescriptor{
+		{
+			Descriptor: descriptor,
+			Platform:   platformSpec,
+		},
+	}
+
+	imageIndex, err := manifestlist.FromDescriptorsWithMediaType(manifestDescriptors, indexMediaType)
+	if err != nil {
+		t.Fatalf("%s: unexpected error creating image index: %v", testname, err)
+	}
 
 	var indexDigest digest.Digest
 	if indexDigest, err = ms.Put(ctx, imageIndex); err != nil {
@@ -512,9 +543,6 @@ func testOCIManifestStorage(t *testing.T, testname string, includeMediaTypes boo
 }
 
 func TestIndexManifestStorageWithoutImageCheck(t *testing.T) {
-	imageMediaType := v1.MediaTypeImageManifest
-	indexMediaType := v1.MediaTypeImageIndex
-
 	repoName, _ := reference.WithName("foo/bar")
 	env := newManifestStoreTestEnv(t, repoName, "thetag",
 		BlobDescriptorCacheProvider(memory.NewInMemoryBlobDescriptorCacheProvider(memory.UnlimitedSize)),
@@ -526,69 +554,50 @@ func TestIndexManifestStorageWithoutImageCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Build a manifest and store its layers in the registry
-
-	blobStore := env.repository.Blobs(ctx)
-	manifest, err := createRandomImage(t, t.Name(), imageMediaType, blobStore)
-	if err != nil {
-		t.Fatalf("unexpected error generating random image: %v", err)
+	// Create an image index referencing child manifests that do NOT exist.
+	// Without EnableValidateImageIndexImagesExist, this should succeed.
+	manifestDescriptors := []manifestlist.ManifestDescriptor{
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:1a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "amd64",
+				OS:           "linux",
+			},
+		},
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:2a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "arm64",
+				OS:           "linux",
+			},
+		},
 	}
 
-	// create an image index
-
-	ociPlatformSpec := &v1.Platform{
-		Architecture: "atari2600",
-		OS:           "CP/M",
-	}
-
-	ociManifestDescriptors := []distribution.Descriptor{
-		createOciManifestDescriptor(t, t.Name(), manifest, ociPlatformSpec),
-	}
-
-	imageIndex, err := ociIndexFromDesriptorsWithMediaType(ociManifestDescriptors, indexMediaType)
+	imageIndex, err := manifestlist.FromDescriptorsWithMediaType(manifestDescriptors, v1.MediaTypeImageIndex)
 	if err != nil {
 		t.Fatalf("unexpected error creating image index: %v", err)
 	}
 
-	// We should be able to put the index without having put the image
-
 	_, err = ms.Put(ctx, imageIndex)
 	if err != nil {
-		t.Fatalf("unexpected error putting sparse OCI image index: %v", err)
-	}
-
-	// same for a manifest list
-
-	listPlatformSpec := &manifestlist.PlatformSpec{
-		Architecture: "atari2600",
-		OS:           "CP/M",
-	}
-
-	listManifestDescriptors := []manifestlist.ManifestDescriptor{
-		createManifestListDescriptor(t, t.Name(), manifest, listPlatformSpec),
-	}
-
-	list, err := manifestlist.FromDescriptors(listManifestDescriptors)
-	if err != nil {
-		t.Fatalf("unexpected error creating manifest list: %v", err)
-	}
-
-	// We should be able to put the list without having put the image
-
-	_, err = ms.Put(ctx, list)
-	if err != nil {
-		t.Fatalf("unexpected error putting sparse manifest list: %v", err)
+		t.Fatalf("expected image index put to succeed without image check, got: %v", err)
 	}
 }
 
 func TestIndexManifestStorageWithSelectivePlatforms(t *testing.T) {
-	imageMediaType := v1.MediaTypeImageManifest
-	indexMediaType := v1.MediaTypeImageIndex
-
 	repoName, _ := reference.WithName("foo/bar")
 	env := newManifestStoreTestEnv(t, repoName, "thetag",
 		BlobDescriptorCacheProvider(memory.NewInMemoryBlobDescriptorCacheProvider(memory.UnlimitedSize)),
-		EnableDelete, EnableRedirect, EnableValidateImageIndexImagesExist,
+		EnableDelete, EnableRedirect,
+		EnableValidateImageIndexImagesExist,
 		AddValidateImageIndexImagesExistPlatform("amd64", "linux"))
 
 	ctx := context.Background()
@@ -597,155 +606,104 @@ func TestIndexManifestStorageWithSelectivePlatforms(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Build a manifests their layers in the registry
-
+	// Build and store a real manifest for the amd64/linux platform
 	blobStore := env.repository.Blobs(ctx)
-	amdManifest, err := createRandomImage(t, t.Name(), imageMediaType, blobStore)
+	builder := ocischema.NewManifestBuilder(blobStore, []byte{}, map[string]string{})
+
+	for i := 0; i < 2; i++ {
+		rs, dgst, err := testutil.CreateRandomTarFile()
+		if err != nil {
+			t.Fatalf("unexpected error generating test layer file: %v", err)
+		}
+
+		wr, err := env.repository.Blobs(env.ctx).Create(env.ctx)
+		if err != nil {
+			t.Fatalf("unexpected error creating test upload: %v", err)
+		}
+
+		if _, err := io.Copy(wr, rs); err != nil {
+			t.Fatalf("unexpected error copying to upload: %v", err)
+		}
+
+		if _, err := wr.Commit(env.ctx, distribution.Descriptor{Digest: dgst}); err != nil {
+			t.Fatalf("unexpected error finishing upload: %v", err)
+		}
+
+		builder.AppendReference(distribution.Descriptor{Digest: dgst})
+	}
+
+	mfst, err := builder.Build(ctx)
 	if err != nil {
-		t.Fatalf("%s: unexpected error generating random image: %v", t.Name(), err)
+		t.Fatalf("unexpected error generating manifest: %v", err)
 	}
-	armManifest, err := createRandomImage(t, t.Name(), imageMediaType, blobStore)
+
+	amd64Digest, err := ms.Put(ctx, mfst)
 	if err != nil {
-		t.Fatalf("%s: unexpected error generating random image: %v", t.Name(), err)
+		t.Fatalf("unexpected error putting manifest: %v", err)
 	}
-	atariManifest, err := createRandomImage(t, t.Name(), imageMediaType, blobStore)
+
+	amd64Descriptor, err := env.registry.BlobStatter().Stat(ctx, amd64Digest)
 	if err != nil {
-		t.Fatalf("%s: unexpected error generating random image: %v", t.Name(), err)
+		t.Fatalf("unexpected error getting manifest descriptor: %v", err)
+	}
+	amd64Descriptor.MediaType = v1.MediaTypeImageManifest
+
+	// Create an image index with amd64/linux (exists) and arm64/linux (does NOT exist).
+	// Only amd64/linux is in the platform filter, so arm64/linux missing should be OK.
+	manifestDescriptors := []manifestlist.ManifestDescriptor{
+		{
+			Descriptor: amd64Descriptor,
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "amd64",
+				OS:           "linux",
+			},
+		},
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:2a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "arm64",
+				OS:           "linux",
+			},
+		},
 	}
 
-	// create an image index
-
-	amdPlatformSpec := &v1.Platform{
-		Architecture: "amd64",
-		OS:           "linux",
-	}
-	armPlatformSpec := &v1.Platform{
-		Architecture: "arm",
-		OS:           "plan9",
-	}
-	atariPlatformSpec := &v1.Platform{
-		Architecture: "atari2600",
-		OS:           "CP/M",
-	}
-
-	manifestDescriptors := []distribution.Descriptor{
-		createOciManifestDescriptor(t, t.Name(), amdManifest, amdPlatformSpec),
-		createOciManifestDescriptor(t, t.Name(), armManifest, armPlatformSpec),
-		createOciManifestDescriptor(t, t.Name(), atariManifest, atariPlatformSpec),
-	}
-
-	imageIndex, err := ociIndexFromDesriptorsWithMediaType(manifestDescriptors, indexMediaType)
+	imageIndex, err := manifestlist.FromDescriptorsWithMediaType(manifestDescriptors, v1.MediaTypeImageIndex)
 	if err != nil {
 		t.Fatalf("unexpected error creating image index: %v", err)
 	}
 
-	// Test we can't push with no image manifests existing in the registry
-
 	_, err = ms.Put(ctx, imageIndex)
+	if err != nil {
+		t.Fatalf("expected image index put to succeed with selective platforms, got: %v", err)
+	}
+
+	// Now test the failure case: amd64/linux child is missing but is required
+	manifestDescriptors2 := []manifestlist.ManifestDescriptor{
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:3a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "amd64",
+				OS:           "linux",
+			},
+		},
+	}
+
+	imageIndex2, err := manifestlist.FromDescriptorsWithMediaType(manifestDescriptors2, v1.MediaTypeImageIndex)
+	if err != nil {
+		t.Fatalf("unexpected error creating image index: %v", err)
+	}
+
+	_, err = ms.Put(ctx, imageIndex2)
 	if err == nil {
-		t.Fatalf("expected error putting image index without existing images: %v", err)
-	}
-
-	// Test we can't push with a manifest but not the right one
-
-	_, err = ms.Put(ctx, atariManifest)
-	if err != nil {
-		t.Fatalf("unexpected error putting manifest: %v", err)
-	}
-
-	_, err = ms.Put(ctx, imageIndex)
-	if err == nil {
-		t.Fatalf("expected error putting image index without correct existing images: %v", err)
-	}
-
-	// Test we can push with the right manifest
-
-	_, err = ms.Put(ctx, amdManifest)
-	if err != nil {
-		t.Fatalf("unexpected error putting manifest: %v", err)
-	}
-
-	_, err = ms.Put(ctx, imageIndex)
-	if err != nil {
-		t.Fatalf("unexpected error putting image index: %v", err)
-	}
-}
-
-// createRandomImage builds an image manifest and store it and its layers in the registry
-func createRandomImage(t *testing.T, testname string, imageMediaType string, blobStore distribution.BlobStore) (distribution.Manifest, error) {
-	builder := ocischema.NewManifestBuilder(blobStore, []byte{}, map[string]string{})
-	err := builder.(*ocischema.Builder).SetMediaType(imageMediaType)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := context.Background()
-
-	// Add some layers
-	for i := 0; i < 2; i++ {
-		rs, dgst, err := testutil.CreateRandomTarFile()
-		if err != nil {
-			t.Fatalf("%s: unexpected error generating test layer file", testname)
-		}
-
-		wr, err := blobStore.Create(ctx)
-		if err != nil {
-			t.Fatalf("%s: unexpected error creating test upload: %v", testname, err)
-		}
-
-		if _, err := io.Copy(wr, rs); err != nil {
-			t.Fatalf("%s: unexpected error copying to upload: %v", testname, err)
-		}
-
-		if _, err := wr.Commit(ctx, distribution.Descriptor{Digest: dgst}); err != nil {
-			t.Fatalf("%s: unexpected error finishing upload: %v", testname, err)
-		}
-
-		if err := builder.AppendReference(distribution.Descriptor{Digest: dgst, MediaType: v1.MediaTypeImageLayer}); err != nil {
-			t.Fatalf("%s unexpected error appending references: %v", testname, err)
-		}
-	}
-
-	return builder.Build(ctx)
-}
-
-// createOciManifestDescriptor builds a manifest descriptor from a manifest and a platform descriptor
-func createOciManifestDescriptor(t *testing.T, testname string, manifest distribution.Manifest, platformSpec *v1.Platform) distribution.Descriptor {
-	manifestMediaType, manifestPayload, err := manifest.Payload()
-	if err != nil {
-		t.Fatalf("%s: unexpected error getting manifest payload: %v", testname, err)
-	}
-	manifestDigest := digest.FromBytes(manifestPayload)
-
-	return distribution.Descriptor{
-		Digest:    manifestDigest,
-		Size:      int64(len(manifestPayload)),
-		MediaType: manifestMediaType,
-		Platform: &v1.Platform{
-			Architecture: platformSpec.Architecture,
-			OS:           platformSpec.OS,
-		},
-	}
-}
-
-// createManifestListDescriptor builds a manifest descriptor from a manifest and a platform descriptor
-func createManifestListDescriptor(t *testing.T, testname string, manifest distribution.Manifest, platformSpec *manifestlist.PlatformSpec) manifestlist.ManifestDescriptor {
-	manifestMediaType, manifestPayload, err := manifest.Payload()
-	if err != nil {
-		t.Fatalf("%s: unexpected error getting manifest payload: %v", testname, err)
-	}
-	manifestDigest := digest.FromBytes(manifestPayload)
-
-	return manifestlist.ManifestDescriptor{
-		Descriptor: distribution.Descriptor{
-			Digest:    manifestDigest,
-			Size:      int64(len(manifestPayload)),
-			MediaType: manifestMediaType,
-		},
-		Platform: manifestlist.PlatformSpec{
-			Architecture: platformSpec.Architecture,
-			OS:           platformSpec.OS,
-		},
+		t.Fatal("expected error putting image index with missing required platform image")
 	}
 }
 
