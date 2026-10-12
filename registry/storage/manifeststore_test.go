@@ -59,7 +59,7 @@ func TestManifestStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testManifestStorage(t, true, BlobDescriptorCacheProvider(memory.NewInMemoryBlobDescriptorCacheProvider(memory.UnlimitedSize)), EnableDelete, EnableRedirect, Schema1SigningKey(k), EnableSchema1)
+	testManifestStorage(t, true, BlobDescriptorCacheProvider(memory.NewInMemoryBlobDescriptorCacheProvider(memory.UnlimitedSize)), EnableDelete, EnableRedirect, Schema1SigningKey(k), EnableSchema1, EnableValidateImageIndexImagesExist)
 }
 
 func TestManifestStorageV1Unsupported(t *testing.T) {
@@ -394,7 +394,7 @@ func testOCIManifestStorage(t *testing.T, testname string, includeMediaTypes boo
 	repoName, _ := reference.WithName("foo/bar")
 	env := newManifestStoreTestEnv(t, repoName, "thetag",
 		BlobDescriptorCacheProvider(memory.NewInMemoryBlobDescriptorCacheProvider(memory.UnlimitedSize)),
-		EnableDelete, EnableRedirect)
+		EnableDelete, EnableRedirect, EnableValidateImageIndexImagesExist)
 
 	ctx := context.Background()
 	ms, err := env.repository.Manifests(ctx)
@@ -539,6 +539,171 @@ func testOCIManifestStorage(t *testing.T, testname string, includeMediaTypes boo
 
 	if payloadMediaType != v1.MediaTypeImageIndex {
 		t.Fatalf("%s: unexpected MediaType for index payload, %s", testname, payloadMediaType)
+	}
+}
+
+func TestIndexManifestStorageWithoutImageCheck(t *testing.T) {
+	repoName, _ := reference.WithName("foo/bar")
+	env := newManifestStoreTestEnv(t, repoName, "thetag",
+		BlobDescriptorCacheProvider(memory.NewInMemoryBlobDescriptorCacheProvider(memory.UnlimitedSize)),
+		EnableDelete, EnableRedirect)
+
+	ctx := context.Background()
+	ms, err := env.repository.Manifests(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an image index referencing child manifests that do NOT exist.
+	// Without EnableValidateImageIndexImagesExist, this should succeed.
+	manifestDescriptors := []manifestlist.ManifestDescriptor{
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:1a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "amd64",
+				OS:           "linux",
+			},
+		},
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:2a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "arm64",
+				OS:           "linux",
+			},
+		},
+	}
+
+	imageIndex, err := manifestlist.FromDescriptorsWithMediaType(manifestDescriptors, v1.MediaTypeImageIndex)
+	if err != nil {
+		t.Fatalf("unexpected error creating image index: %v", err)
+	}
+
+	_, err = ms.Put(ctx, imageIndex)
+	if err != nil {
+		t.Fatalf("expected image index put to succeed without image check, got: %v", err)
+	}
+}
+
+func TestIndexManifestStorageWithSelectivePlatforms(t *testing.T) {
+	repoName, _ := reference.WithName("foo/bar")
+	env := newManifestStoreTestEnv(t, repoName, "thetag",
+		BlobDescriptorCacheProvider(memory.NewInMemoryBlobDescriptorCacheProvider(memory.UnlimitedSize)),
+		EnableDelete, EnableRedirect,
+		EnableValidateImageIndexImagesExist,
+		AddValidateImageIndexImagesExistPlatform("amd64", "linux"))
+
+	ctx := context.Background()
+	ms, err := env.repository.Manifests(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build and store a real manifest for the amd64/linux platform
+	blobStore := env.repository.Blobs(ctx)
+	builder := ocischema.NewManifestBuilder(blobStore, []byte{}, map[string]string{})
+
+	for i := 0; i < 2; i++ {
+		rs, dgst, err := testutil.CreateRandomTarFile()
+		if err != nil {
+			t.Fatalf("unexpected error generating test layer file: %v", err)
+		}
+
+		wr, err := env.repository.Blobs(env.ctx).Create(env.ctx)
+		if err != nil {
+			t.Fatalf("unexpected error creating test upload: %v", err)
+		}
+
+		if _, err := io.Copy(wr, rs); err != nil {
+			t.Fatalf("unexpected error copying to upload: %v", err)
+		}
+
+		if _, err := wr.Commit(env.ctx, distribution.Descriptor{Digest: dgst}); err != nil {
+			t.Fatalf("unexpected error finishing upload: %v", err)
+		}
+
+		builder.AppendReference(distribution.Descriptor{Digest: dgst})
+	}
+
+	mfst, err := builder.Build(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error generating manifest: %v", err)
+	}
+
+	amd64Digest, err := ms.Put(ctx, mfst)
+	if err != nil {
+		t.Fatalf("unexpected error putting manifest: %v", err)
+	}
+
+	amd64Descriptor, err := env.registry.BlobStatter().Stat(ctx, amd64Digest)
+	if err != nil {
+		t.Fatalf("unexpected error getting manifest descriptor: %v", err)
+	}
+	amd64Descriptor.MediaType = v1.MediaTypeImageManifest
+
+	// Create an image index with amd64/linux (exists) and arm64/linux (does NOT exist).
+	// Only amd64/linux is in the platform filter, so arm64/linux missing should be OK.
+	manifestDescriptors := []manifestlist.ManifestDescriptor{
+		{
+			Descriptor: amd64Descriptor,
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "amd64",
+				OS:           "linux",
+			},
+		},
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:2a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "arm64",
+				OS:           "linux",
+			},
+		},
+	}
+
+	imageIndex, err := manifestlist.FromDescriptorsWithMediaType(manifestDescriptors, v1.MediaTypeImageIndex)
+	if err != nil {
+		t.Fatalf("unexpected error creating image index: %v", err)
+	}
+
+	_, err = ms.Put(ctx, imageIndex)
+	if err != nil {
+		t.Fatalf("expected image index put to succeed with selective platforms, got: %v", err)
+	}
+
+	// Now test the failure case: amd64/linux child is missing but is required
+	manifestDescriptors2 := []manifestlist.ManifestDescriptor{
+		{
+			Descriptor: distribution.Descriptor{
+				Digest:    "sha256:3a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
+				Size:      3253,
+				MediaType: v1.MediaTypeImageManifest,
+			},
+			Platform: manifestlist.PlatformSpec{
+				Architecture: "amd64",
+				OS:           "linux",
+			},
+		},
+	}
+
+	imageIndex2, err := manifestlist.FromDescriptorsWithMediaType(manifestDescriptors2, v1.MediaTypeImageIndex)
+	if err != nil {
+		t.Fatalf("unexpected error creating image index: %v", err)
+	}
+
+	_, err = ms.Put(ctx, imageIndex2)
+	if err == nil {
+		t.Fatal("expected error putting image index with missing required platform image")
 	}
 }
 
