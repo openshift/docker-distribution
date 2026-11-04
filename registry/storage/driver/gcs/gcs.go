@@ -61,6 +61,28 @@ var rangeHeader = regexp.MustCompile(`^bytes=([0-9])+-([0-9]+)$`)
 
 var _ storagedriver.FileWriter = &writer{}
 
+func credentialsFromJSON(ctx context.Context, data []byte) (*google.Credentials, error) {
+	var header struct {
+		Type google.CredentialsType `json:"type"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return nil, err
+	}
+
+	switch header.Type {
+	case google.ServiceAccount,
+		google.AuthorizedUser,
+		google.ExternalAccount,
+		google.ExternalAccountAuthorizedUser,
+		google.ImpersonatedServiceAccount,
+		google.GDCHServiceAccount:
+	default:
+		return nil, fmt.Errorf("unsupported GCS credential type %q", header.Type)
+	}
+
+	return google.CredentialsFromJSONWithType(ctx, data, header.Type, storage.ScopeFullControl)
+}
+
 // driverParameters is a struct that encapsulates all of the driver parameters after all values have been set
 type driverParameters struct {
 	bucket        string
@@ -166,7 +188,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 		if err != nil {
 			return nil, err
 		}
-		creds, err = google.CredentialsFromJSON(context.Background(), jsonKey, storage.ScopeFullControl)
+		creds, err = credentialsFromJSON(ctx, jsonKey)
 		if err != nil {
 			return nil, err
 		}
@@ -212,7 +234,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 			return nil, fmt.Errorf("failed to marshal gcs credentials to json")
 		}
 
-		creds, err = google.CredentialsFromJSON(context.Background(), data, storage.ScopeFullControl)
+		creds, err = credentialsFromJSON(ctx, data)
 		if err != nil {
 			return nil, err
 		}
