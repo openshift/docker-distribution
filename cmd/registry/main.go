@@ -16,6 +16,7 @@ import (
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/middleware/redirect"
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/middleware/rewrite"
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/s3-aws"
+	_ "github.com/distribution/distribution/v3/registry/storage/driver/swift"
 )
 
 func main() {

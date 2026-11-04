@@ -164,6 +164,18 @@ storage:
     usedualstack: false
     usefipsendpoint: false
     loglevel: debug
+  swift:
+    username: username
+    password: password
+    authurl: https://storage.myprovider.com/auth/v1.0 or https://storage.myprovider.com/v2.0 or https://storage.myprovider.com/v3/auth
+    tenant: tenantname
+    tenantid: tenantid
+    domain: domain name for Openstack Identity v3 API
+    domainid: domain id for Openstack Identity v3 API
+    insecureskipverify: true
+    region: fr
+    container: containername
+    rootdirectory: /swift/object/name/prefix
   inmemory:  # This driver takes no parameters
   tag:
     concurrencylimit: 8

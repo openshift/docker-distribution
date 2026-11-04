@@ -394,6 +394,10 @@ github.com/mitchellh/mapstructure
 # github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 ## explicit
 github.com/munnerz/goautoneg
+# github.com/ncw/swift v1.0.47
+## explicit
+github.com/ncw/swift
+github.com/ncw/swift/swifttest
 # github.com/opencontainers/go-digest v1.0.0
 ## explicit; go 1.13
 github.com/opencontainers/go-digest
