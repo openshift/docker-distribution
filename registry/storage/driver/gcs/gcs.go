@@ -197,7 +197,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 			return nil, fmt.Errorf("failed to get universe domain: %w", err)
 		}
 		clientOpts := []option.ClientOption{
-			option.WithCredentialsJSON(jsonKey),
+			option.WithAuthCredentialsJSON(option.CredentialsType(getTypeFromCredentialsJSON(jsonKey)), jsonKey),
 			option.WithUniverseDomain(ud),
 		}
 		options = append(options, clientOpts...)
@@ -243,7 +243,7 @@ func FromParameters(ctx context.Context, parameters map[string]any) (storagedriv
 			return nil, fmt.Errorf("failed to get universe domain: %w", err)
 		}
 		clientOpts := []option.ClientOption{
-			option.WithCredentialsJSON(data),
+			option.WithAuthCredentialsJSON(option.CredentialsType(getTypeFromCredentialsJSON(data)), data),
 			option.WithUniverseDomain(ud),
 		}
 		options = append(options, clientOpts...)

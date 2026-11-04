@@ -55,7 +55,7 @@ func init() {
 		privateKey = getPrivateKeyFromCredentialsJSON(creds.JSON)
 		ts = creds.TokenSource
 
-		gcs, err := storage.NewClient(dcontext.Background(), option.WithCredentialsJSON(jsonKey))
+		gcs, err := storage.NewClient(dcontext.Background(), option.WithAuthCredentialsJSON(option.CredentialsType(credentialsType), jsonKey))
 		if err != nil {
 			panic(fmt.Sprintf("Error initializing gcs client : %v", err))
 		}
