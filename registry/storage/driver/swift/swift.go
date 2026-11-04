@@ -841,7 +841,11 @@ func (w *writer) Close() error {
 	}
 
 	if !w.committed && !w.cancelled {
-		if err := w.driver.createManifest(ctx, w.path, w.driver.Container+"/"+w.segmentsPath); err != nil {
+		if w.size == 0 {
+			if err := w.driver.PutContent(ctx, w.path, nil); err != nil {
+				return err
+			}
+		} else if err := w.driver.createManifest(ctx, w.path, w.driver.Container+"/"+w.segmentsPath); err != nil {
 			return err
 		}
 		if err := w.waitForSegmentsToShowUp(ctx); err != nil {
@@ -876,7 +880,11 @@ func (w *writer) Commit(ctx context.Context) error {
 		return err
 	}
 
-	if err := w.driver.createManifest(ctx, w.path, w.driver.Container+"/"+w.segmentsPath); err != nil {
+	if w.size == 0 {
+		if err := w.driver.PutContent(ctx, w.path, nil); err != nil {
+			return err
+		}
+	} else if err := w.driver.createManifest(ctx, w.path, w.driver.Container+"/"+w.segmentsPath); err != nil {
 		return err
 	}
 
