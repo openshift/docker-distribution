@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"io"
 	"path"
 	"testing"
@@ -920,5 +921,94 @@ func TestTaggedManifestlistWithDeletedReference(t *testing.T) {
 	after := allBlobs(t, registry)
 	if len(after) != 0 {
 		t.Fatalf("Garbage collection affected storage: %d != %d", len(after), 0)
+	}
+}
+
+// TestGCKeepsChildrenOfDecodedOCIIndex stores an index decoded from its bytes,
+// as the PUT handler does, and checks GC marks its children through it.
+func TestGCKeepsChildrenOfDecodedOCIIndex(t *testing.T) {
+	ctx := dcontext.Background()
+	inmemoryDriver := inmemory.New()
+
+	registry := createRegistry(t, inmemoryDriver)
+	repo := makeRepository(t, registry, "gc/ociindex")
+	manifestService := makeManifestService(t, repo)
+	tags := repo.Tags(ctx)
+
+	var children []v1.Descriptor
+	var images []image
+	for _, tag := range []string{"child1", "child2"} {
+		im := uploadRandomOCIImage(t, repo)
+		_, p, err := im.manifest.Payload()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tags.Tag(ctx, tag, v1.Descriptor{Digest: im.manifestDigest}); err != nil {
+			t.Fatal(err)
+		}
+		images = append(images, im)
+		children = append(children, v1.Descriptor{MediaType: v1.MediaTypeImageManifest, Digest: im.manifestDigest, Size: int64(len(p))})
+	}
+
+	ii, err := ocischema.FromDescriptors(children, map[string]string{"a": "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, b, _ := ii.Payload()
+	decoded, desc, err := distribution.UnmarshalManifest(v1.MediaTypeImageIndex, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dgst, err := manifestService.Put(ctx, decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dgst != digest.FromBytes(b) || desc.Digest != dgst {
+		t.Fatalf("stored digest %s, descriptor %s, want %s", dgst, desc.Digest, digest.FromBytes(b))
+	}
+	if err := tags.Tag(ctx, "index", desc); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range []string{"child1", "child2"} {
+		if err := tags.Untag(ctx, tag); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	before := allBlobs(t, registry)
+	if err := MarkAndSweep(ctx, inmemoryDriver, registry, GCOpts{RemoveUntagged: true}); err != nil {
+		t.Fatalf("Failed mark and sweep: %v", err)
+	}
+	after := allBlobs(t, registry)
+	if len(before) != len(after) {
+		t.Fatalf("Garbage collection affected storage: %d != %d", len(before), len(after))
+	}
+	for _, im := range images {
+		if _, ok := after[im.manifestDigest]; !ok {
+			t.Fatalf("child manifest %s removed", im.manifestDigest)
+		}
+		for l := range im.layers {
+			if _, ok := after[l]; !ok {
+				t.Fatalf("child layer %s removed", l)
+			}
+		}
+	}
+
+	stored, err := manifestService.Get(ctx, dgst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mt, p, _ := stored.Payload(); mt != v1.MediaTypeImageIndex || !bytes.Equal(p, b) {
+		t.Fatalf("stored index changed: media type %s, byte-identical %t", mt, bytes.Equal(p, b))
+	}
+
+	if err := tags.Untag(ctx, "index"); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkAndSweep(ctx, inmemoryDriver, registry, GCOpts{RemoveUntagged: true}); err != nil {
+		t.Fatalf("Failed mark and sweep: %v", err)
+	}
+	if _, ok := allBlobs(t, registry)[dgst]; ok {
+		t.Fatal("untagged index survived GC")
 	}
 }

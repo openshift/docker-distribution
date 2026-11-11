@@ -2969,3 +2969,308 @@ func TestProxyManifestGetByTag(t *testing.T) {
 		"Docker-Content-Digest": []string{newDigest.String()},
 	})
 }
+
+// TestManifestAPIOCIImageIndexRecord pushes OCI image indexes, a Docker
+// manifest list and their children, then logs what PUT, GET, HEAD and DELETE
+// return for each Accept header. Content is fixed, so the "REC" lines can be
+// diffed between registry builds.
+func TestManifestAPIOCIImageIndexRecord(t *testing.T) {
+	env := newTestEnv(t, true)
+	defer env.Shutdown()
+
+	name, err := reference.WithName("oci/index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushBlob := func(b []byte) v1.Descriptor {
+		dgst := digest.FromBytes(b)
+		uploadURLBase, _ := startPushLayer(t, env, name)
+		pushLayer(t, env.builder, name, dgst, uploadURLBase, bytes.NewReader(b))
+		return v1.Descriptor{Digest: dgst, Size: int64(len(b))}
+	}
+	marshal := func(v any) []byte {
+		b, err := json.MarshalIndent(v, "", "   ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	manifestURL := func(ref string) string {
+		var r reference.Reference
+		if dgst, err := digest.Parse(ref); err == nil {
+			r, _ = reference.WithDigest(name, dgst)
+		} else {
+			r, _ = reference.WithTag(name, ref)
+		}
+		u, err := env.builder.BuildManifestURL(r.(reference.Named))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	do := func(method, ref, contentType string, accept []string, body []byte) (*http.Response, []byte) {
+		req, err := http.NewRequest(method, manifestURL(ref), bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		for _, a := range accept {
+			req.Header.Add("Accept", a)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		p, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp, p
+	}
+	record := func(subject, op string, resp *http.Response, body []byte) {
+		ct := resp.Header.Get("Content-Type")
+		sum := digest.FromBytes(body).Encoded()[:12]
+		if ct == "application/vnd.docker.distribution.manifest.v1+prettyjws" {
+			sum = "signed-per-run"
+		}
+		t.Logf("REC %-14s %-28s -> %d ct=%s dcd=%s len=%s body=%s", subject, op, resp.StatusCode,
+			ct, resp.Header.Get("Docker-Content-Digest"), resp.Header.Get("Content-Length"), sum)
+	}
+
+	config := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)
+	configDesc := pushBlob(config)
+	layerDesc := pushBlob([]byte("layer"))
+
+	ociImage := func(arch string) []byte {
+		cfg := configDesc
+		cfg.MediaType = v1.MediaTypeImageConfig
+		layer := layerDesc
+		layer.MediaType = v1.MediaTypeImageLayer
+		return marshal(v1.Manifest{
+			Versioned:   specs.Versioned{SchemaVersion: 2},
+			MediaType:   v1.MediaTypeImageManifest,
+			Config:      cfg,
+			Layers:      []v1.Descriptor{layer},
+			Annotations: map[string]string{"arch": arch},
+		})
+	}
+	schema2Image := func(arch string) []byte {
+		cfg := configDesc
+		cfg.MediaType = schema2.MediaTypeImageConfig
+		layer := layerDesc
+		layer.MediaType = schema2.MediaTypeLayer
+		return []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":%q,"config":{"mediaType":%q,"digest":%q,"size":%d},"layers":[{"mediaType":%q,"digest":%q,"size":%d}],"x-arch":%q}`,
+			schema2.MediaTypeManifest, cfg.MediaType, cfg.Digest, cfg.Size, layer.MediaType, layer.Digest, layer.Size, arch))
+	}
+
+	type subject struct {
+		name, tag, contentType string
+		body                   []byte
+	}
+	var subjects []subject
+	var ociChildren, dockerChildren []v1.Descriptor
+	for _, arch := range []string{"amd64", "arm64"} {
+		b := ociImage(arch)
+		subjects = append(subjects, subject{"oci-image-" + arch, "oci-" + arch, v1.MediaTypeImageManifest, b})
+		ociChildren = append(ociChildren, v1.Descriptor{MediaType: v1.MediaTypeImageManifest, Digest: digest.FromBytes(b), Size: int64(len(b)), Platform: &v1.Platform{Architecture: arch, OS: "linux"}})
+		b = schema2Image(arch)
+		subjects = append(subjects, subject{"schema2-" + arch, "s2-" + arch, schema2.MediaTypeManifest, b})
+		dockerChildren = append(dockerChildren, v1.Descriptor{MediaType: schema2.MediaTypeManifest, Digest: digest.FromBytes(b), Size: int64(len(b)), Platform: &v1.Platform{Architecture: arch, OS: "linux"}})
+	}
+	subjects = append(subjects,
+		subject{"oci-index", "index", v1.MediaTypeImageIndex, marshal(v1.Index{
+			Versioned: specs.Versioned{SchemaVersion: 2},
+			MediaType: v1.MediaTypeImageIndex,
+			Manifests: ociChildren,
+		})},
+		subject{"oci-index-nomt", "index-nomt", v1.MediaTypeImageIndex, marshal(v1.Index{
+			Versioned: specs.Versioned{SchemaVersion: 2},
+			Manifests: ociChildren,
+		})},
+		subject{"oci-index-annot", "index-annot", v1.MediaTypeImageIndex, marshal(v1.Index{
+			Versioned:    specs.Versioned{SchemaVersion: 2},
+			MediaType:    v1.MediaTypeImageIndex,
+			ArtifactType: "application/vnd.example.artifact",
+			Manifests:    ociChildren,
+			Subject:      &ociChildren[0],
+			Annotations:  map[string]string{"org.opencontainers.image.ref.name": "x", "com.example": "y"},
+		})},
+		subject{"docker-list", "list", manifestlist.MediaTypeManifestList, []byte(fmt.Sprintf(
+			`{"schemaVersion":2,"mediaType":%q,"manifests":[{"mediaType":%q,"digest":%q,"size":%d,"platform":{"architecture":"amd64","os":"linux"}},{"mediaType":%q,"digest":%q,"size":%d,"platform":{"architecture":"arm64","os":"linux"}}]}`,
+			manifestlist.MediaTypeManifestList,
+			dockerChildren[0].MediaType, dockerChildren[0].Digest, dockerChildren[0].Size,
+			dockerChildren[1].MediaType, dockerChildren[1].Digest, dockerChildren[1].Size))},
+	)
+
+	accepts := []struct {
+		name  string
+		types []string
+	}{
+		{"oci", []string{v1.MediaTypeImageIndex}},
+		{"list", []string{manifestlist.MediaTypeManifestList}},
+		{"both", []string{v1.MediaTypeImageIndex, manifestlist.MediaTypeManifestList}},
+		{"none", nil},
+		{"docker-client", []string{schema2.MediaTypeManifest, manifestlist.MediaTypeManifestList, v1.MediaTypeImageManifest, v1.MediaTypeImageIndex}},
+	}
+	for _, s := range subjects {
+		dgst := digest.FromBytes(s.body)
+		resp, p := do(http.MethodPut, s.tag, s.contentType, nil, s.body)
+		record(s.name, "PUT tag", resp, p)
+		if resp.StatusCode != http.StatusCreated || resp.Header.Get("Docker-Content-Digest") != dgst.String() {
+			t.Fatalf("%s: PUT returned %d, digest %q, want 201 %s", s.name, resp.StatusCode, resp.Header.Get("Docker-Content-Digest"), dgst)
+		}
+		for _, ref := range []string{s.tag, dgst.String()} {
+			by := "tag"
+			if ref != s.tag {
+				by = "digest"
+			}
+			for _, a := range accepts {
+				for _, method := range []string{http.MethodGet, http.MethodHead} {
+					resp, p := do(method, ref, "", a.types, nil)
+					record(s.name, method+" "+by+" accept="+a.name, resp, p)
+					if !strings.HasPrefix(s.name, "oci-index") || (a.name != "oci" && a.name != "both" && a.name != "docker-client") {
+						continue
+					}
+					if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != v1.MediaTypeImageIndex ||
+						resp.Header.Get("Docker-Content-Digest") != dgst.String() || resp.Header.Get("Content-Length") != strconv.Itoa(len(s.body)) {
+						t.Errorf("%s %s %s accept=%s: %d %v", s.name, method, by, a.name, resp.StatusCode, resp.Header)
+					}
+					if method == http.MethodGet && !bytes.Equal(p, s.body) {
+						t.Errorf("%s GET %s accept=%s: body not byte-identical", s.name, by, a.name)
+					}
+				}
+			}
+		}
+	}
+
+	// Mismatched or missing Content-Type on an index PUT.
+	for _, s := range subjects[len(subjects)-4 : len(subjects)-1] {
+		for _, ct := range []string{manifestlist.MediaTypeManifestList, ""} {
+			resp, p := do(http.MethodPut, s.tag+"-ct", ct, nil, s.body)
+			record(s.name, "PUT ct="+ct, resp, p)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("%s PUT ct=%q: %d, want 400", s.name, ct, resp.StatusCode)
+			}
+		}
+	}
+
+	// Delete the parents before their children.
+	for i := len(subjects) - 1; i >= 0; i-- {
+		s := subjects[i]
+		dgst := digest.FromBytes(s.body).String()
+		for _, step := range []struct {
+			op, method, ref string
+			accept          []string
+			want            int
+		}{
+			{"DELETE tag", http.MethodDelete, s.tag, nil, http.StatusAccepted},
+			{"GET tag after tag delete", http.MethodGet, s.tag, nil, http.StatusNotFound},
+			{"DELETE digest", http.MethodDelete, dgst, nil, http.StatusAccepted},
+			{"GET digest after delete", http.MethodGet, dgst, []string{v1.MediaTypeImageIndex, v1.MediaTypeImageManifest}, http.StatusNotFound},
+		} {
+			resp, p := do(step.method, step.ref, "", step.accept, nil)
+			record(s.name, step.op, resp, p)
+			if resp.StatusCode != step.want {
+				t.Errorf("%s %s: %d, want %d", s.name, step.op, resp.StatusCode, step.want)
+			}
+		}
+	}
+}
+
+// TestProxyManifestGetOCIIndex pulls an OCI index through a pull-through
+// proxy. The first pull is served from the remote and the second from the
+// proxy's storage; both must return the index unchanged for any Accept.
+func TestProxyManifestGetOCIIndex(t *testing.T) {
+	truthConfig := configuration.Configuration{
+		Storage: configuration.Storage{
+			"inmemory": configuration.Parameters{},
+			"maintenance": configuration.Parameters{"uploadpurging": map[any]any{
+				"enabled": false,
+			}},
+		},
+	}
+	truthConfig.HTTP.Headers = headerConfig
+	truthEnv := newTestEnvWithConfig(t, &truthConfig)
+	defer truthEnv.Shutdown()
+
+	name, _ := reference.WithName("oci/index")
+	pushBlob := func(mediaType string, b []byte) v1.Descriptor {
+		dgst := digest.FromBytes(b)
+		uploadURLBase, _ := startPushLayer(t, truthEnv, name)
+		pushLayer(t, truthEnv.builder, name, dgst, uploadURLBase, bytes.NewReader(b))
+		return v1.Descriptor{MediaType: mediaType, Digest: dgst, Size: int64(len(b))}
+	}
+	put := func(tag, mediaType string, v any) []byte {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, _ := reference.WithTag(name, tag)
+		u, _ := truthEnv.builder.BuildManifestURL(ref)
+		req, _ := http.NewRequest(http.MethodPut, u, bytes.NewReader(b))
+		req.Header.Set("Content-Type", mediaType)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		checkResponse(t, "putting "+tag, resp, http.StatusCreated)
+		return b
+	}
+	img := put("img", v1.MediaTypeImageManifest, v1.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: v1.MediaTypeImageManifest,
+		Config:    pushBlob(v1.MediaTypeImageConfig, []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`)),
+		Layers:    []v1.Descriptor{pushBlob(v1.MediaTypeImageLayer, []byte("layer"))},
+	})
+	idx := put("index", v1.MediaTypeImageIndex, v1.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: v1.MediaTypeImageIndex,
+		Manifests: []v1.Descriptor{{
+			MediaType: v1.MediaTypeImageManifest,
+			Digest:    digest.FromBytes(img),
+			Size:      int64(len(img)),
+			Platform:  &v1.Platform{Architecture: "amd64", OS: "linux"},
+		}},
+	})
+	idxDigest := digest.FromBytes(idx)
+	dref, _ := reference.WithDigest(name, idxDigest)
+
+	for _, accept := range []string{manifestlist.MediaTypeManifestList, "", v1.MediaTypeImageIndex} {
+		proxyConfig := configuration.Configuration{
+			Storage: configuration.Storage{
+				"inmemory": configuration.Parameters{},
+			},
+			Proxy: configuration.Proxy{
+				RemoteURL: truthEnv.server.URL,
+			},
+		}
+		proxyConfig.HTTP.Headers = headerConfig
+		proxyEnv := newTestEnvWithConfig(t, &proxyConfig)
+		u, _ := proxyEnv.builder.BuildManifestURL(dref)
+
+		for _, try := range []string{"first", "cached"} {
+			req, _ := http.NewRequest(http.MethodGet, u, nil)
+			if accept != "" {
+				req.Header.Set("Accept", accept)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("Docker-Content-Digest") != idxDigest.String() || !bytes.Equal(p, idx) {
+				t.Errorf("accept=%q %s pull: %d digest %q identical=%t, want 200 %s identical=true",
+					accept, try, resp.StatusCode, resp.Header.Get("Docker-Content-Digest"), bytes.Equal(p, idx), idxDigest)
+			}
+		}
+		proxyEnv.Shutdown()
+	}
+}
