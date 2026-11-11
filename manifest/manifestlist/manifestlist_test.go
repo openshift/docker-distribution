@@ -204,3 +204,38 @@ func TestValidateManifestList(t *testing.T) {
 		}
 	})
 }
+
+func TestFromDescriptorsMediaType(t *testing.T) {
+	docker, _ := makeTestManifestList(t, MediaTypeManifestList)
+	ociFirst := []ManifestDescriptor{
+		{Descriptor: v1.Descriptor{MediaType: v1.MediaTypeImageManifest, Digest: docker[0].Digest, Size: 985}},
+		docker[1],
+	}
+	for _, tc := range []struct {
+		name        string
+		descriptors []ManifestDescriptor
+		want        string
+	}{
+		{"docker first", docker, MediaTypeManifestList},
+		{"oci first", ociFirst, v1.MediaTypeImageIndex},
+		{"oci second", []ManifestDescriptor{docker[0], ociFirst[0]}, MediaTypeManifestList},
+		{"empty", nil, MediaTypeManifestList},
+	} {
+		m, err := FromDescriptors(tc.descriptors)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if ct, _, _ := m.Payload(); ct != tc.want {
+			t.Errorf("%s: media type %s, want %s", tc.name, ct, tc.want)
+		}
+	}
+
+	// A Docker list built from Docker children is byte-identical to before.
+	m, err := FromDescriptors(docker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, p, _ := m.Payload(); !bytes.Equal(p, []byte(expectedManifestListSerialization)) {
+		t.Errorf("docker list payload changed:\n%s", p)
+	}
+}

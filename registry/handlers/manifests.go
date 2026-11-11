@@ -175,10 +175,6 @@ func (imh *manifestHandler) GetManifest(w http.ResponseWriter, r *http.Request) 
 		imh.Errors = append(imh.Errors, errcode.ErrorCodeManifestUnknown.WithMessage("OCI manifest found, but accept header does not support OCI manifests"))
 		return
 	}
-	if manifestType == ociImageIndexSchema && !supports[ociImageIndexSchema] {
-		imh.Errors = append(imh.Errors, errcode.ErrorCodeManifestUnknown.WithMessage("OCI index found, but accept header does not support OCI indexes"))
-		return
-	}
 
 	// Only rewrite manifests fetched by tag. A response fetched by digest must
 	// retain the requested digest.

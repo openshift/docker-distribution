@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/distribution/distribution/v3"
+	"github.com/distribution/distribution/v3/manifest/manifestlist"
 	"github.com/distribution/distribution/v3/manifest/schema2"
 	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -182,7 +183,7 @@ func indexMediaTypeTest(contentType string, mediaType string, shouldError bool) 
 				t.Fatalf("error unmarshaling manifest, %v", err)
 			}
 
-			asManifest := unmarshalled.(*DeserializedImageIndex)
+			asManifest := unmarshalled.(*manifestlist.DeserializedManifestList)
 			if asManifest.MediaType != mediaType {
 				t.Fatalf("Bad media type '%v' as unmarshalled", asManifest.MediaType)
 			}
@@ -231,4 +232,41 @@ func TestValidateIndex(t *testing.T) {
 			t.Error("manifest should not be valid")
 		}
 	})
+}
+
+func TestOCIImageIndexDecodesAsManifestList(t *testing.T) {
+	for _, mediaType := range []string{v1.MediaTypeImageIndex, ""} {
+		_, index := makeTestOCIImageIndex(t, mediaType)
+		_, b, _ := index.Payload()
+
+		m, desc, err := distribution.UnmarshalManifest(v1.MediaTypeImageIndex, b)
+		if err != nil {
+			t.Fatalf("mediaType %q: unmarshal: %v", mediaType, err)
+		}
+		if _, ok := m.(*manifestlist.DeserializedManifestList); !ok {
+			t.Fatalf("mediaType %q: decoded as %T", mediaType, m)
+		}
+		ct, p, err := m.Payload()
+		if err != nil {
+			t.Fatalf("mediaType %q: payload: %v", mediaType, err)
+		}
+		if ct != v1.MediaTypeImageIndex {
+			t.Errorf("mediaType %q: payload media type %s", mediaType, ct)
+		}
+		if !bytes.Equal(p, b) {
+			t.Errorf("mediaType %q: payload not byte-identical", mediaType)
+		}
+		want := v1.Descriptor{
+			MediaType:   v1.MediaTypeImageIndex,
+			Digest:      digest.FromBytes(b),
+			Size:        int64(len(b)),
+			Annotations: index.Annotations,
+		}
+		if !reflect.DeepEqual(desc, want) {
+			t.Errorf("mediaType %q: descriptor %+v, want %+v", mediaType, desc, want)
+		}
+		if refs := m.References(); len(refs) != len(index.Manifests) {
+			t.Errorf("mediaType %q: %d references, want %d", mediaType, len(refs), len(index.Manifests))
+		}
+	}
 }

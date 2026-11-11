@@ -7,6 +7,7 @@ import (
 
 	"github.com/distribution/distribution/v3"
 	"github.com/distribution/distribution/v3/manifest"
+	"github.com/distribution/distribution/v3/manifest/manifestlist"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -44,7 +45,15 @@ func unmarshalImageIndex(b []byte) (distribution.Manifest, v1.Descriptor, error)
 		return nil, v1.Descriptor{}, fmt.Errorf("if present, mediaType in image index should be '%s' not '%s'", v1.MediaTypeImageIndex, m.MediaType)
 	}
 
-	return m, v1.Descriptor{
+	// Return the index as a manifest list, as distribution did before v3.1:
+	// clients type-switch on *manifestlist.DeserializedManifestList. It keeps
+	// the exact payload, so the digest and OCI media type are unchanged.
+	ml := &manifestlist.DeserializedManifestList{}
+	if err := ml.UnmarshalJSON(b); err != nil {
+		return nil, v1.Descriptor{}, err
+	}
+
+	return ml, v1.Descriptor{
 		MediaType:   v1.MediaTypeImageIndex,
 		Digest:      digest.FromBytes(b),
 		Size:        int64(len(b)),

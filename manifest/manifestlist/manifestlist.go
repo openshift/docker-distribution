@@ -130,7 +130,14 @@ type DeserializedManifestList struct {
 // DeserializedManifestList which contains the resulting manifest list
 // and its JSON representation.
 func FromDescriptors(descriptors []ManifestDescriptor) (*DeserializedManifestList, error) {
-	return fromDescriptorsWithMediaType(descriptors, MediaTypeManifestList)
+	mediaType := MediaTypeManifestList
+	// OCI image index decodes to this type, so a list rebuilt from OCI
+	// children stays an OCI index, as before distribution v3.1.
+	if len(descriptors) > 0 && descriptors[0].MediaType == v1.MediaTypeImageManifest {
+		mediaType = v1.MediaTypeImageIndex
+	}
+
+	return fromDescriptorsWithMediaType(descriptors, mediaType)
 }
 
 // fromDescriptorsWithMediaType is for testing purposes, it's useful to be able to specify the media type explicitly
