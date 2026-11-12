@@ -4,13 +4,14 @@ import (
 	"testing"
 
 	"github.com/distribution/distribution/v3"
-	"github.com/distribution/distribution/v3/manifest/schema1" //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
-	"github.com/distribution/distribution/v3/reference"
+	"github.com/distribution/distribution/v3/internal/uuid"
+	"github.com/distribution/distribution/v3/manifest/schema2"
 	v2 "github.com/distribution/distribution/v3/registry/api/v2"
-	"github.com/distribution/distribution/v3/uuid"
+	"github.com/distribution/reference"
 	events "github.com/docker/go-events"
-	"github.com/docker/libtrust"
 	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 var (
@@ -19,29 +20,23 @@ var (
 	repo   = "test/repo"
 	source = SourceRecord{
 		Addr:       "remote.test",
-		InstanceID: uuid.Generate().String(),
+		InstanceID: uuid.NewString(),
 	}
 	ub = mustUB(v2.NewURLBuilderFromString("http://test.example.com/", false))
 
 	actor = ActorRecord{
 		Name: "test",
 	}
-	request = RequestRecord{}
-	layers  = []schema1.FSLayer{ //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
-		{
-			BlobSum: "asdf",
-		},
-		{
-			BlobSum: "qwer",
-		},
-	}
-	m = schema1.Manifest{ //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
-		Name:     repo,
-		Tag:      "latest",
-		FSLayers: layers,
+	request      = RequestRecord{}
+	tag          = "latest"
+	artifactType = "application/vnd.example.sbom.v1"
+	cfg          = v1.Descriptor{
+		MediaType: artifactType,
+		Size:      100,
+		Digest:    "cfgdgst",
 	}
 
-	sm      *schema1.SignedManifest //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
+	sm      *schema2.DeserializedManifest
 	payload []byte
 	dgst    digest.Digest
 )
@@ -83,7 +78,7 @@ func TestEventBridgeManifestPushedWithTag(t *testing.T) {
 	}))
 
 	repoRef, _ := reference.WithName(repo)
-	if err := l.ManifestPushed(repoRef, sm, distribution.WithTag(m.Tag)); err != nil {
+	if err := l.ManifestPushed(repoRef, sm, distribution.WithTag(tag)); err != nil {
 		t.Fatalf("unexpected error notifying manifest pull: %v", err)
 	}
 }
@@ -99,7 +94,7 @@ func TestEventBridgeManifestPulledWithTag(t *testing.T) {
 	}))
 
 	repoRef, _ := reference.WithName(repo)
-	if err := l.ManifestPulled(repoRef, sm, distribution.WithTag(m.Tag)); err != nil {
+	if err := l.ManifestPulled(repoRef, sm, distribution.WithTag(tag)); err != nil {
 		t.Fatalf("unexpected error notifying manifest pull: %v", err)
 	}
 }
@@ -122,14 +117,14 @@ func TestEventBridgeManifestDeleted(t *testing.T) {
 func TestEventBridgeTagDeleted(t *testing.T) {
 	l := createTestEnv(t, testSinkFn(func(event events.Event) error {
 		checkDeleted(t, EventActionDelete, event)
-		if event.(Event).Target.Tag != m.Tag {
-			t.Fatalf("unexpected tag on event target: %q != %q", event.(Event).Target.Tag, m.Tag)
+		if event.(Event).Target.Tag != tag {
+			t.Fatalf("unexpected tag on event target: %q != %q", event.(Event).Target.Tag, tag)
 		}
 		return nil
 	}))
 
 	repoRef, _ := reference.WithName(repo)
-	if err := l.TagDeleted(repoRef, m.Tag); err != nil {
+	if err := l.TagDeleted(repoRef, tag); err != nil {
 		t.Fatalf("unexpected error notifying tag deletion: %v", err)
 	}
 }
@@ -147,18 +142,20 @@ func TestEventBridgeRepoDeleted(t *testing.T) {
 }
 
 func createTestEnv(t *testing.T, fn testSinkFn) Listener {
-	pk, err := libtrust.GenerateECP256PrivateKey()
-	if err != nil {
-		t.Fatalf("error generating private key: %v", err)
+	mfst := schema2.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: v1.MediaTypeImageManifest,
+		Config:    cfg,
 	}
 
-	sm, err = schema1.Sign(&m, pk) //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
+	deserializedManifest, err := schema2.FromStruct(mfst)
 	if err != nil {
-		t.Fatalf("error signing manifest: %v", err)
+		t.Fatalf("creating OCI manifest: %v", err)
 	}
 
-	payload = sm.Canonical
+	_, payload, _ = deserializedManifest.Payload()
 	dgst = digest.FromBytes(payload)
+	sm = deserializedManifest
 
 	return NewBridge(ub, source, actor, request, fn, true)
 }
@@ -197,15 +194,6 @@ func checkCommonManifest(t *testing.T, action string, event events.Event) {
 
 	if event.(Event).Target.URL != u {
 		t.Fatalf("incorrect url passed: \n%q != \n%q", event.(Event).Target.URL, u)
-	}
-
-	if len(event.(Event).Target.References) != len(layers) {
-		t.Fatalf("unexpected number of references %v != %v", len(event.(Event).Target.References), len(layers))
-	}
-	for i, targetReference := range event.(Event).Target.References {
-		if targetReference.Digest != layers[i].BlobSum {
-			t.Fatalf("unexpected reference: %q != %q", targetReference.Digest, layers[i].BlobSum)
-		}
 	}
 }
 

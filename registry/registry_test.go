@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/distribution/distribution/v3/configuration"
-	dcontext "github.com/distribution/distribution/v3/context"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -53,6 +53,61 @@ func TestNextProtos(t *testing.T) {
 	}
 }
 
+func TestServerProtocols(t *testing.T) {
+	tests := []struct {
+		name          string
+		h2cEnabled    bool
+		http2Disabled bool
+		wantNil       bool
+		wantHTTP2     bool
+	}{
+		{
+			name:    "default protocols",
+			wantNil: true,
+		},
+		{
+			name:       "h2c enabled",
+			h2cEnabled: true,
+			wantHTTP2:  true,
+		},
+		{
+			name:          "h2c enabled with tls http2 disabled",
+			h2cEnabled:    true,
+			http2Disabled: true,
+			wantHTTP2:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &configuration.Configuration{}
+			config.HTTP.H2C.Enabled = tt.h2cEnabled
+			config.HTTP.HTTP2.Disabled = tt.http2Disabled
+
+			protocols := serverProtocols(config)
+			if tt.wantNil {
+				if protocols != nil {
+					t.Fatalf("expected nil protocols, got %s", protocols)
+				}
+				return
+			}
+			if protocols == nil {
+				t.Fatal("expected protocols, got nil")
+				return
+			}
+			if !protocols.HTTP1() {
+				t.Fatal("expected HTTP/1 to be enabled")
+			}
+			if got := protocols.HTTP2(); got != tt.wantHTTP2 {
+				t.Fatalf("HTTP/2 enabled = %v, want %v", got, tt.wantHTTP2)
+			}
+			if !protocols.UnencryptedHTTP2() {
+				t.Fatal("expected unencrypted HTTP/2 to be enabled")
+			}
+		})
+	}
+}
+
 type registryTLSConfig struct {
 	cipherSuites    []string
 	certificatePath string
@@ -71,7 +126,7 @@ func setupRegistry(tlsCfg *registryTLSConfig, addr string) (*Registry, error) {
 		config.HTTP.TLS.Certificate = tlsCfg.certificatePath
 		config.HTTP.TLS.Key = tlsCfg.privateKeyPath
 	}
-	config.Storage = map[string]configuration.Parameters{"inmemory": map[string]interface{}{}}
+	config.Storage = map[string]configuration.Parameters{"inmemory": map[string]any{}}
 	return NewRegistry(context.Background(), config)
 }
 
@@ -80,9 +135,8 @@ func TestGracefulShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	// run registry server
-	var errchan chan error
+	errchan := make(chan error, 1)
 	go func() {
 		errchan <- registry.ListenAndServe()
 	}()
@@ -95,31 +149,39 @@ func TestGracefulShutdown(t *testing.T) {
 	// Wait for some unknown random time for server to start listening
 	time.Sleep(3 * time.Second)
 
-	// send incomplete request
+	//Establish connection
 	conn, err := net.Dial("tcp", "localhost:5000")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fmt.Fprintf(conn, "GET /v2/ ")
 
+	// Send a complete, valid HTTP/1.1 request
+	_, err = fmt.Fprintf(conn, "GET /v2/ HTTP/1.1\r\nHost: localhost:5000\r\n\r\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Give server time to receive and start processing the request
+	time.Sleep(100 * time.Millisecond)
 	// send stop signal
-	quit <- os.Interrupt
+	registry.quit <- os.Interrupt
+	// wait for shutdown to begin
 	time.Sleep(100 * time.Millisecond)
 
-	// try connecting again. it shouldn't
-	_, err = net.Dial("tcp", "localhost:5000")
+	// try connecting again - it should be rejected during graceful shutdown
+	conn2, err := net.Dial("tcp", "localhost:5000")
 	if err == nil {
+		conn2.Close()
 		t.Fatal("Managed to connect after stopping.")
 	}
 
-	// make sure earlier request is not disconnected and response can be received
-	fmt.Fprintf(conn, "HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+	// Verify the original connection's request completes successfully
 	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != "200 OK" {
-		t.Error("response status is not 200 OK: ", resp.Status)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("Expected status 200 OK, got: %s ", resp.Status)
 	}
 	if body, err := io.ReadAll(resp.Body); err != nil || string(body) != "{}" {
 		t.Error("Body is not {}; ", string(body))
@@ -170,7 +232,7 @@ func TestGetCipherSuite(t *testing.T) {
 }
 
 func buildRegistryTLSConfig(name, keyType string, cipherSuites []string) (*registryTLSConfig, error) {
-	var priv interface{}
+	var priv any
 	var pub crypto.PublicKey
 	var err error
 	switch keyType {
@@ -218,7 +280,9 @@ func buildRegistryTLSConfig(name, keyType string, cipherSuites []string) (*regis
 		return nil, fmt.Errorf("failed to create certificate: %v", err)
 	}
 	if _, err := os.Stat(os.TempDir()); os.IsNotExist(err) {
-		os.Mkdir(os.TempDir(), 1777)
+		if err := os.Mkdir(os.TempDir(), 1777); err != nil {
+			return nil, fmt.Errorf("failed to create temp dir: %v", err)
+		}
 	}
 
 	certPath := path.Join(os.TempDir(), name+".pem")
@@ -313,6 +377,7 @@ func TestRegistrySupportedCipherSuite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.Status != "200 OK" {
 		t.Error("response status is not 200 OK: ", resp.Status)
 	}
@@ -321,7 +386,7 @@ func TestRegistrySupportedCipherSuite(t *testing.T) {
 	}
 
 	// send stop signal
-	quit <- os.Interrupt
+	registry.quit <- os.Interrupt
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -365,7 +430,7 @@ func TestRegistryUnsupportedCipherSuite(t *testing.T) {
 	}
 
 	// send stop signal
-	quit <- os.Interrupt
+	registry.quit <- os.Interrupt
 	time.Sleep(100 * time.Millisecond)
 }
 

@@ -8,25 +8,26 @@ import (
 	"testing"
 
 	"github.com/distribution/distribution/v3"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 type mockTagStore struct {
-	mapping map[string]distribution.Descriptor
+	mapping map[string]v1.Descriptor
 	sync.Mutex
 	distribution.TagService
 }
 
-func (m *mockTagStore) Get(ctx context.Context, tag string) (distribution.Descriptor, error) {
+func (m *mockTagStore) Get(ctx context.Context, tag string) (v1.Descriptor, error) {
 	m.Lock()
 	defer m.Unlock()
 
 	if d, ok := m.mapping[tag]; ok {
 		return d, nil
 	}
-	return distribution.Descriptor{}, distribution.ErrTagUnknown{}
+	return v1.Descriptor{}, distribution.ErrTagUnknown{}
 }
 
-func (m *mockTagStore) Tag(ctx context.Context, tag string, desc distribution.Descriptor) error {
+func (m *mockTagStore) Tag(ctx context.Context, tag string, desc v1.Descriptor) error {
 	m.Lock()
 	defer m.Unlock()
 
@@ -49,7 +50,7 @@ func (m *mockTagStore) All(ctx context.Context) ([]string, error) {
 	m.Lock()
 	defer m.Unlock()
 
-	var tags []string
+	tags := make([]string, 0, len(m.mapping))
 	for tag := range m.mapping {
 		tags = append(tags, tag)
 	}
@@ -57,12 +58,33 @@ func (m *mockTagStore) All(ctx context.Context) ([]string, error) {
 	return tags, nil
 }
 
+func (m *mockTagStore) Lookup(ctx context.Context, digest distribution.Descriptor) ([]string, error) {
+	panic("not implemented")
+}
+
+func (m *mockTagStore) List(ctx context.Context, limit int, last string) ([]string, error) {
+	m.Lock()
+	defer m.Unlock()
+	tags := make([]string, 0, len(m.mapping))
+	for tag := range m.mapping {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	result := make([]string, 0, limit)
+	for _, tag := range tags {
+		if tag > last && len(result) < limit {
+			result = append(result, tag)
+		}
+	}
+	return result, nil
+}
+
 func testProxyTagService(local, remote map[string]distribution.Descriptor) *proxyTagService {
 	if local == nil {
-		local = make(map[string]distribution.Descriptor)
+		local = make(map[string]v1.Descriptor)
 	}
 	if remote == nil {
-		remote = make(map[string]distribution.Descriptor)
+		remote = make(map[string]v1.Descriptor)
 	}
 	return &proxyTagService{
 		localTags:      &mockTagStore{mapping: local},
@@ -72,9 +94,9 @@ func testProxyTagService(local, remote map[string]distribution.Descriptor) *prox
 }
 
 func TestGet(t *testing.T) {
-	remoteDesc := distribution.Descriptor{Size: 42}
+	remoteDesc := v1.Descriptor{Size: 42}
 	remoteTag := "remote"
-	proxyTags := testProxyTagService(map[string]distribution.Descriptor{remoteTag: remoteDesc}, nil)
+	proxyTags := testProxyTagService(map[string]v1.Descriptor{remoteTag: remoteDesc}, nil)
 
 	ctx := context.Background()
 
@@ -98,11 +120,11 @@ func TestGet(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(local, remoteDesc) {
-		t.Fatalf("unexpected descriptor pulled through")
+		t.Fatal("unexpected descriptor pulled through")
 	}
 
 	// Manually overwrite remote tag
-	newRemoteDesc := distribution.Descriptor{Size: 43}
+	newRemoteDesc := v1.Descriptor{Size: 43}
 	err = proxyTags.remoteTags.Tag(ctx, remoteTag, newRemoteDesc)
 	if err != nil {
 		t.Fatal(err)
@@ -134,12 +156,12 @@ func TestGet(t *testing.T) {
 
 	_, err = proxyTags.localTags.Get(ctx, remoteTag)
 	if err == nil {
-		t.Fatalf("Expected error getting Untag'd tag")
+		t.Fatal("Expected error getting Untag'd tag")
 	}
 
 	_, err = proxyTags.remoteTags.Get(ctx, remoteTag)
 	if err != nil {
-		t.Fatalf("remote tag should not be untagged with proxyTag.Untag")
+		t.Fatal("remote tag should not be untagged with proxyTag.Untag")
 	}
 
 	_, err = proxyTags.Get(ctx, remoteTag)
@@ -152,7 +174,7 @@ func TestGet(t *testing.T) {
 	}
 
 	// Add another tag.  Ensure both tags appear in 'All'
-	err = proxyTags.remoteTags.Tag(ctx, "funtag", distribution.Descriptor{Size: 42})
+	err = proxyTags.remoteTags.Tag(ctx, "funtag", v1.Descriptor{Size: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +193,33 @@ func TestGet(t *testing.T) {
 		t.Fatalf("Unexpected tags returned from All() : %v ", all)
 	}
 
-	if proxyTags.authChallenger.(*mockChallenger).count != 4 {
-		t.Fatalf("Expected 4 auth challenge calls, got %#v", proxyTags.authChallenger)
+	list, err := proxyTags.List(ctx, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(list) != 1 {
+		t.Fatalf("Unexpected tag length returned from List() : %d ", len(list))
+	}
+
+	if list[0] != "funtag" {
+		t.Fatalf("Unexpected tags returned from List() : %v ", list)
+	}
+
+	list2, err := proxyTags.List(ctx, 1, "funtag")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(list2) != 1 {
+		t.Fatalf("Unexpected tag length returned from List() : %d ", len(list2))
+	}
+
+	if list2[0] != "remote" {
+		t.Fatalf("Unexpected tags returned from List() : %v ", list2)
+	}
+
+	if proxyTags.authChallenger.(*mockChallenger).count != 6 {
+		t.Fatalf("Expected 6 auth challenge calls, got %#v", proxyTags.authChallenger)
 	}
 }

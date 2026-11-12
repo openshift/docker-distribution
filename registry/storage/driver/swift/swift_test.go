@@ -1,6 +1,7 @@
 package swift
 
 import (
+	"context"
 	"os"
 	"reflect"
 	"strconv"
@@ -9,15 +10,9 @@ import (
 
 	"github.com/ncw/swift/v2/swifttest"
 
-	"github.com/distribution/distribution/v3/context"
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/distribution/v3/registry/storage/driver/testsuites"
-
-	"gopkg.in/check.v1"
 )
-
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) { check.TestingT(t) }
 
 var swiftDriverConstructor func(prefix string) (*Driver, error)
 
@@ -61,12 +56,6 @@ func init() {
 		container = "test"
 	}
 
-	prefix, err := os.MkdirTemp("", "driver-")
-	if err != nil {
-		panic(err)
-	}
-	defer os.Remove(prefix)
-
 	swiftDriverConstructor = func(root string) (*Driver, error) {
 		parameters := Parameters{
 			username,
@@ -98,12 +87,22 @@ func init() {
 
 		return New(parameters)
 	}
+}
 
-	driverConstructor := func() (storagedriver.StorageDriver, error) {
-		return swiftDriverConstructor(prefix)
+func newDriverConstructor(tb testing.TB) testsuites.DriverConstructor {
+	root := tb.TempDir()
+
+	return func() (storagedriver.StorageDriver, error) {
+		return swiftDriverConstructor(root)
 	}
+}
 
-	testsuites.RegisterSuite(driverConstructor, testsuites.NeverSkip)
+func TestSwiftDriverSuite(t *testing.T) {
+	testsuites.Driver(t, newDriverConstructor(t), false)
+}
+
+func BenchmarkSwiftDriverSuite(b *testing.B) {
+	testsuites.BenchDriver(b, newDriverConstructor(b))
 }
 
 func TestEmptyRootList(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -221,7 +220,6 @@ func TestRouterWithBadCharacters(t *testing.T) {
 		// with random UTF8 characters not in the 128 bit ASCII range.
 		// These are not valid characters for the router and we expect
 		// 404s on every test.
-		rand.Seed(time.Now().UTC().UnixNano())
 		tests := make([]routeTestCase, 1000)
 		for idx := range tests {
 			tests[idx] = routeTestCase{
@@ -256,7 +254,6 @@ func checkTestRouter(t *testing.T, tests []routeTestCase, prefix string, deeplyE
 	server := httptest.NewServer(router)
 
 	for _, tc := range tests {
-		tc := tc
 		requestURI := strings.TrimSuffix(prefix, "/") + tc.RequestURI
 		t.Run("("+tc.RouteName+")"+requestURI, func(t *testing.T) {
 			t.Parallel()

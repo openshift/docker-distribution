@@ -4,20 +4,19 @@ import (
 	"fmt"
 
 	"github.com/distribution/distribution/v3"
-	"github.com/distribution/distribution/v3/context"
-	"github.com/distribution/distribution/v3/manifest"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/distribution/distribution/v3/manifest/manifestlist"
-	"github.com/distribution/distribution/v3/manifest/schema1" //nolint:staticcheck // Ignore SA1019: "github.com/distribution/distribution/v3/manifest/schema1" is deprecated, as it's used for backward compatibility.
+	"github.com/distribution/distribution/v3/manifest/ocischema"
 	"github.com/distribution/distribution/v3/manifest/schema2"
-	"github.com/docker/libtrust"
 	"github.com/opencontainers/go-digest"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // MakeManifestList constructs a manifest list out of a list of manifest digests
 func MakeManifestList(blobstatter distribution.BlobStatter, manifestDigests []digest.Digest) (*manifestlist.DeserializedManifestList, error) {
-	ctx := context.Background()
+	ctx := dcontext.Background()
 
-	var manifestDescriptors []manifestlist.ManifestDescriptor
+	manifestDescriptors := make([]manifestlist.ManifestDescriptor, 0, len(manifestDigests))
 	for _, manifestDigest := range manifestDigests {
 		descriptor, err := blobstatter.Stat(ctx, manifestDigest)
 		if err != nil {
@@ -39,42 +38,10 @@ func MakeManifestList(blobstatter distribution.BlobStatter, manifestDigests []di
 	return manifestlist.FromDescriptors(manifestDescriptors)
 }
 
-// MakeSchema1Manifest constructs a schema 1 manifest from a given list of digests and returns
-// the digest of the manifest.
-//
-// Deprecated: Docker Image Manifest v2, Schema 1 is deprecated since 2015.
-// Use Docker Image Manifest v2, Schema 2, or the OCI Image Specification.
-func MakeSchema1Manifest(digests []digest.Digest) (*schema1.SignedManifest, error) {
-	mfst := schema1.Manifest{
-		Versioned: manifest.Versioned{
-			SchemaVersion: 1,
-		},
-		Name: "who",
-		Tag:  "cares",
-	}
-
-	for _, d := range digests {
-		mfst.FSLayers = append(mfst.FSLayers, schema1.FSLayer{BlobSum: d})
-		mfst.History = append(mfst.History, schema1.History{V1Compatibility: ""})
-	}
-
-	pk, err := libtrust.GenerateECP256PrivateKey()
-	if err != nil {
-		return nil, fmt.Errorf("unexpected error generating private key: %v", err)
-	}
-
-	signedManifest, err := schema1.Sign(&mfst, pk)
-	if err != nil {
-		return nil, fmt.Errorf("error signing manifest: %v", err)
-	}
-
-	return signedManifest, nil
-}
-
 // MakeSchema2Manifest constructs a schema 2 manifest from a given list of digests and returns
 // the digest of the manifest
 func MakeSchema2Manifest(repository distribution.Repository, digests []digest.Digest) (distribution.Manifest, error) {
-	ctx := context.Background()
+	ctx := dcontext.Background()
 	blobStore := repository.Blobs(ctx)
 
 	var configJSON []byte
@@ -84,13 +51,36 @@ func MakeSchema2Manifest(repository distribution.Repository, digests []digest.Di
 		return nil, fmt.Errorf("unexpected error storing content in blobstore: %v", err)
 	}
 	builder := schema2.NewManifestBuilder(d, configJSON)
-	for _, digest := range digests {
-		builder.AppendReference(distribution.Descriptor{Digest: digest})
+	for _, dgst := range digests {
+		if err := builder.AppendReference(v1.Descriptor{Digest: dgst}); err != nil {
+			return nil, fmt.Errorf("unexpected error building schema2 manifest: %v", err)
+		}
 	}
 
 	mfst, err := builder.Build(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unexpected error generating manifest: %v", err)
+		return nil, fmt.Errorf("unexpected error generating schema2 manifest: %v", err)
+	}
+
+	return mfst, nil
+}
+
+func MakeOCIManifest(repository distribution.Repository, digests []digest.Digest) (distribution.Manifest, error) {
+	ctx := dcontext.Background()
+	blobStore := repository.Blobs(ctx)
+
+	var configJSON []byte
+
+	builder := ocischema.NewManifestBuilder(blobStore, configJSON, make(map[string]string))
+	for _, dgst := range digests {
+		if err := builder.AppendReference(v1.Descriptor{Digest: dgst}); err != nil {
+			return nil, fmt.Errorf("unexpected error building OCI manifest: %v", err)
+		}
+	}
+
+	mfst, err := builder.Build(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected error generating OCI manifest: %v", err)
 	}
 
 	return mfst, nil

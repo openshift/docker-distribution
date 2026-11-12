@@ -1,7 +1,14 @@
 # syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.19.9
-ARG ALPINE_VERSION=3.16
+# GO_VERSION sets the version of the golang base image to use.
+# It must be a supported tag in the docker.io/library/golang image repository.
+ARG GO_VERSION=1.25.9
+
+# ALPINE_VERSION sets the version of the alpine base image to use, including for the golang image.
+# It must be a supported tag in the docker.io/library/alpine image repository
+# that's also available as alpine image variant for the Golang version used.
+ARG ALPINE_VERSION=3.23
+
 ARG MODOUTDATED_VERSION=v0.8.0
 
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS base
@@ -40,7 +47,6 @@ EOT
 
 FROM psampaz/go-mod-outdated:${MODOUTDATED_VERSION} AS go-mod-outdated
 FROM base AS outdated
-ARG _RANDOM
 RUN --mount=target=.,ro \
     --mount=target=/go/pkg/mod,type=cache \
     --mount=from=go-mod-outdated,source=/home/go-mod-outdated,target=/usr/bin/go-mod-outdated \

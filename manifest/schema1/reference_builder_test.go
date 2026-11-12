@@ -5,14 +5,14 @@ import (
 
 	"github.com/distribution/distribution/v3/context"
 	"github.com/distribution/distribution/v3/manifest"
-	"github.com/distribution/distribution/v3/reference"
+	"github.com/distribution/reference"
 	"github.com/docker/libtrust"
 	"github.com/opencontainers/go-digest"
 )
 
 func makeSignedManifest(t *testing.T, pk libtrust.PrivateKey, refs []Reference) *SignedManifest {
 	u := &Manifest{
-		Versioned: manifest.Versioned{
+		Versioned: manifest.Versioned{ //nolint:staticcheck // schema1 consumers construct Manifest with manifest.Versioned.
 			SchemaVersion: 1,
 		},
 		Name:         "foo/bar",

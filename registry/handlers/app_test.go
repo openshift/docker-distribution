@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/distribution/distribution/v3/configuration"
-	"github.com/distribution/distribution/v3/context"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/distribution/distribution/v3/registry/api/errcode"
 	v2 "github.com/distribution/distribution/v3/registry/api/v2"
 	"github.com/distribution/distribution/v3/registry/auth"
@@ -25,7 +25,7 @@ import (
 // tested individually.
 func TestAppDispatcher(t *testing.T) {
 	driver := inmemory.New()
-	ctx := context.Background()
+	ctx := dcontext.Background()
 	registry, err := storage.NewRegistry(ctx, driver, storage.BlobDescriptorCacheProvider(memorycache.NewInMemoryBlobDescriptorCacheProvider(0)), storage.EnableDelete, storage.EnableRedirect)
 	if err != nil {
 		t.Fatalf("error creating registry: %v", err)
@@ -128,6 +128,7 @@ func TestAppDispatcher(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("unexpected status code: %v != %v", resp.StatusCode, http.StatusOK)
@@ -138,11 +139,11 @@ func TestAppDispatcher(t *testing.T) {
 // TestNewApp covers the creation of an application via NewApp with a
 // configuration.
 func TestNewApp(t *testing.T) {
-	ctx := context.Background()
+	ctx := dcontext.Background()
 	config := configuration.Configuration{
 		Storage: configuration.Storage{
 			"inmemory": nil,
-			"maintenance": configuration.Parameters{"uploadpurging": map[interface{}]interface{}{
+			"maintenance": configuration.Parameters{"uploadpurging": map[any]any{
 				"enabled": false,
 			}},
 		},
@@ -236,41 +237,41 @@ func TestAppendAccessRecords(t *testing.T) {
 	result := appendAccessRecords(records, http.MethodGet, repo)
 	expectedResult := []auth.Access{expectedPullRecord}
 	if ok := reflect.DeepEqual(result, expectedResult); !ok {
-		t.Fatalf("Actual access record differs from expected")
+		t.Fatal("Actual access record differs from expected")
 	}
 
 	records = []auth.Access{}
 	result = appendAccessRecords(records, http.MethodHead, repo)
 	expectedResult = []auth.Access{expectedPullRecord}
 	if ok := reflect.DeepEqual(result, expectedResult); !ok {
-		t.Fatalf("Actual access record differs from expected")
+		t.Fatal("Actual access record differs from expected")
 	}
 
 	records = []auth.Access{}
 	result = appendAccessRecords(records, http.MethodPost, repo)
 	expectedResult = []auth.Access{expectedPullRecord, expectedPushRecord}
 	if ok := reflect.DeepEqual(result, expectedResult); !ok {
-		t.Fatalf("Actual access record differs from expected")
+		t.Fatal("Actual access record differs from expected")
 	}
 
 	records = []auth.Access{}
 	result = appendAccessRecords(records, http.MethodPut, repo)
 	expectedResult = []auth.Access{expectedPullRecord, expectedPushRecord}
 	if ok := reflect.DeepEqual(result, expectedResult); !ok {
-		t.Fatalf("Actual access record differs from expected")
+		t.Fatal("Actual access record differs from expected")
 	}
 
 	records = []auth.Access{}
 	result = appendAccessRecords(records, http.MethodPatch, repo)
 	expectedResult = []auth.Access{expectedPullRecord, expectedPushRecord}
 	if ok := reflect.DeepEqual(result, expectedResult); !ok {
-		t.Fatalf("Actual access record differs from expected")
+		t.Fatal("Actual access record differs from expected")
 	}
 
 	records = []auth.Access{}
 	result = appendAccessRecords(records, http.MethodDelete, repo)
 	expectedResult = []auth.Access{expectedDeleteRecord}
 	if ok := reflect.DeepEqual(result, expectedResult); !ok {
-		t.Fatalf("Actual access record differs from expected")
+		t.Fatal("Actual access record differs from expected")
 	}
 }

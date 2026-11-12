@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/distribution/distribution/v3"
-	"github.com/distribution/distribution/v3/manifest"
 	"github.com/distribution/distribution/v3/manifest/manifestlist"
-
+	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -41,17 +41,15 @@ const expectedManifestSerialization = `{
 
 func makeTestManifest(mediaType string) Manifest {
 	return Manifest{
-		Versioned: manifest.Versioned{
-			SchemaVersion: 2,
-			MediaType:     mediaType,
-		},
-		Config: distribution.Descriptor{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: mediaType,
+		Config: v1.Descriptor{
 			MediaType:   v1.MediaTypeImageConfig,
 			Digest:      "sha256:1a9ec845ee94c202b2d5da74a24f0ed2058318bfa9879fa541efaecba272e86b",
 			Size:        985,
 			Annotations: map[string]string{"apple": "orange"},
 		},
-		Layers: []distribution.Descriptor{
+		Layers: []v1.Descriptor{
 			{
 				MediaType:   v1.MediaTypeImageLayerGzip,
 				Digest:      "sha256:62d8908bee94c202b2d35224a221aaa2058318bfa9879fa541efaecba272331b",
@@ -142,57 +140,88 @@ func TestManifest(t *testing.T) {
 	}
 }
 
-func mediaTypeTest(t *testing.T, mediaType string, shouldError bool) {
-	mfst := makeTestManifest(mediaType)
+func TestManifestUnmarshal(t *testing.T) {
+	_, descriptor, err := distribution.UnmarshalManifest(v1.MediaTypeImageManifest, []byte(expectedManifestSerialization))
+	if err != nil {
+		t.Fatalf("unmarshal manifest failed: %v", err)
+	}
+	mfst := makeTestManifest(v1.MediaTypeImageManifest)
 
 	deserialized, err := FromStruct(mfst)
 	if err != nil {
 		t.Fatalf("error creating DeserializedManifest: %v", err)
 	}
 
-	unmarshalled, descriptor, err := distribution.UnmarshalManifest(
-		v1.MediaTypeImageManifest,
-		deserialized.canonical)
+	if !reflect.DeepEqual(descriptor.Annotations, deserialized.Annotations) {
+		t.Fatalf("manifest annotation not equal:\nexpected:\n%v\nactual:\n%v\n", deserialized.Annotations, descriptor.Annotations)
+	}
+	if len(descriptor.Annotations) != 1 {
+		t.Fatal("manifest index annotation length should be 1")
+	}
+	if descriptor.Size != int64(len([]byte(expectedManifestSerialization))) {
+		t.Fatalf("manifest size is not correct:\nexpected:\n%d\nactual:\n%v\n", int64(len([]byte(expectedManifestSerialization))), descriptor.Size)
+	}
+	if descriptor.Digest.String() != digest.FromBytes([]byte(expectedManifestSerialization)).String() {
+		t.Fatalf("manifest digest is not correct:\nexpected:\n%s\nactual:\n%s\n", digest.FromBytes([]byte(expectedManifestSerialization)), descriptor.Digest)
+	}
+	if descriptor.MediaType != v1.MediaTypeImageManifest {
+		t.Fatalf("manifest media type is not correct:\nexpected:\n%s\nactual:\n%s\n", v1.MediaTypeImageManifest, descriptor.MediaType)
+	}
+}
 
-	if shouldError {
-		if err == nil {
-			t.Fatalf("bad content type should have produced error")
-		}
-	} else {
+func manifestMediaTypeTest(mediaType string, shouldError bool) func(*testing.T) {
+	return func(t *testing.T) {
+		mfst := makeTestManifest(mediaType)
+
+		deserialized, err := FromStruct(mfst)
 		if err != nil {
-			t.Fatalf("error unmarshaling manifest, %v", err)
+			t.Fatalf("error creating DeserializedManifest: %v", err)
 		}
 
-		asManifest := unmarshalled.(*DeserializedManifest)
-		if asManifest.MediaType != mediaType {
-			t.Fatalf("Bad media type '%v' as unmarshalled", asManifest.MediaType)
-		}
+		unmarshalled, descriptor, err := distribution.UnmarshalManifest(
+			v1.MediaTypeImageManifest,
+			deserialized.canonical)
 
-		if descriptor.MediaType != v1.MediaTypeImageManifest {
-			t.Fatalf("Bad media type '%v' for descriptor", descriptor.MediaType)
-		}
+		if shouldError {
+			if err == nil {
+				t.Fatal("bad content type should have produced error")
+			}
+		} else {
+			if err != nil {
+				t.Fatalf("error unmarshaling manifest, %v", err)
+			}
 
-		unmarshalledMediaType, _, _ := unmarshalled.Payload()
-		if unmarshalledMediaType != v1.MediaTypeImageManifest {
-			t.Fatalf("Bad media type '%v' for payload", unmarshalledMediaType)
+			asManifest := unmarshalled.(*DeserializedManifest)
+			if asManifest.MediaType != mediaType {
+				t.Fatalf("Bad media type '%v' as unmarshalled", asManifest.MediaType)
+			}
+
+			if descriptor.MediaType != v1.MediaTypeImageManifest {
+				t.Fatalf("Bad media type '%v' for descriptor", descriptor.MediaType)
+			}
+
+			unmarshalledMediaType, _, _ := unmarshalled.Payload()
+			if unmarshalledMediaType != v1.MediaTypeImageManifest {
+				t.Fatalf("Bad media type '%v' for payload", unmarshalledMediaType)
+			}
 		}
 	}
 }
 
-func TestMediaTypes(t *testing.T) {
-	mediaTypeTest(t, "", false)
-	mediaTypeTest(t, v1.MediaTypeImageManifest, false)
-	mediaTypeTest(t, v1.MediaTypeImageManifest+"XXX", true)
+func TestManifestMediaTypes(t *testing.T) {
+	t.Run("No_MediaType", manifestMediaTypeTest("", false))
+	t.Run("ImageManifest", manifestMediaTypeTest(v1.MediaTypeImageManifest, false))
+	t.Run("Bad_MediaType", manifestMediaTypeTest(v1.MediaTypeImageManifest+"XXX", true))
 }
 
 func TestValidateManifest(t *testing.T) {
 	mfst := Manifest{
-		Config: distribution.Descriptor{Size: 1},
-		Layers: []distribution.Descriptor{{Size: 2}},
+		Config: v1.Descriptor{Size: 1},
+		Layers: []v1.Descriptor{{Size: 2}},
 	}
 	index := manifestlist.ManifestList{
 		Manifests: []manifestlist.ManifestDescriptor{
-			{Descriptor: distribution.Descriptor{Size: 3}},
+			{Descriptor: v1.Descriptor{Size: 3}},
 		},
 	}
 	t.Run("valid", func(t *testing.T) {

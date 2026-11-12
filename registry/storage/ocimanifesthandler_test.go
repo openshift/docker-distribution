@@ -7,10 +7,10 @@ import (
 	"testing"
 
 	"github.com/distribution/distribution/v3"
-	"github.com/distribution/distribution/v3/manifest"
 	"github.com/distribution/distribution/v3/manifest/ocischema"
 	"github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
 	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -33,31 +33,29 @@ func TestVerifyOCIManifestNonDistributableLayer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nonDistributableLayer := distribution.Descriptor{
+	nonDistributableLayer := v1.Descriptor{
 		Digest:    "sha256:463435349086340864309863409683460843608348608934092322395278926a",
 		Size:      6323,
-		MediaType: v1.MediaTypeImageLayerNonDistributableGzip,
+		MediaType: v1.MediaTypeImageLayerNonDistributableGzip, //nolint:staticcheck // ignore A1019: v1.MediaTypeImageLayerNonDistributableGzip is deprecated: Non-distributable layers are deprecated, and not recommended for future use
 	}
 
-	emptyLayer := distribution.Descriptor{
+	emptyLayer := v1.Descriptor{
 		Digest: "",
 	}
 
-	emptyGzipLayer := distribution.Descriptor{
+	emptyGzipLayer := v1.Descriptor{
 		Digest:    "",
 		MediaType: v1.MediaTypeImageLayerGzip,
 	}
 
 	template := ocischema.Manifest{
-		Versioned: manifest.Versioned{
-			SchemaVersion: 2,
-			MediaType:     v1.MediaTypeImageManifest,
-		},
-		Config: config,
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: v1.MediaTypeImageManifest,
+		Config:    config,
 	}
 
 	type testcase struct {
-		BaseLayer distribution.Descriptor
+		BaseLayer v1.Descriptor
 		URLs      []string
 		Err       error
 	}
@@ -144,7 +142,7 @@ func TestVerifyOCIManifestNonDistributableLayer(t *testing.T) {
 		m := template
 		l := c.BaseLayer
 		l.URLs = c.URLs
-		m.Layers = []distribution.Descriptor{l}
+		m.Layers = []v1.Descriptor{l}
 		dm, err := ocischema.FromStruct(m)
 		if err != nil {
 			t.Error(err)
@@ -189,10 +187,8 @@ func TestVerifyOCIManifestBlobLayerAndConfig(t *testing.T) {
 	}
 
 	template := ocischema.Manifest{
-		Versioned: manifest.Versioned{
-			SchemaVersion: 2,
-			MediaType:     v1.MediaTypeImageManifest,
-		},
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: v1.MediaTypeImageManifest,
 	}
 
 	checkFn := func(m ocischema.Manifest, rerr error) {
@@ -219,7 +215,7 @@ func TestVerifyOCIManifestBlobLayerAndConfig(t *testing.T) {
 	}
 
 	type testcase struct {
-		Desc distribution.Descriptor
+		Desc v1.Descriptor
 		URLs []string
 		Err  error
 	}
@@ -227,25 +223,25 @@ func TestVerifyOCIManifestBlobLayerAndConfig(t *testing.T) {
 	layercases := []testcase{
 		// empty media type
 		{
-			distribution.Descriptor{},
+			v1.Descriptor{},
 			[]string{"http://foo/bar"},
 			digest.ErrDigestInvalidFormat,
 		},
 		{
-			distribution.Descriptor{},
+			v1.Descriptor{},
 			nil,
 			digest.ErrDigestInvalidFormat,
 		},
 		// unknown media type, but blob is present
 		{
-			distribution.Descriptor{
+			v1.Descriptor{
 				Digest: layer.Digest,
 			},
 			nil,
 			nil,
 		},
 		{
-			distribution.Descriptor{
+			v1.Descriptor{
 				Digest: layer.Digest,
 			},
 			[]string{"http://foo/bar"},
@@ -253,21 +249,21 @@ func TestVerifyOCIManifestBlobLayerAndConfig(t *testing.T) {
 		},
 		// gzip layer, but invalid digest
 		{
-			distribution.Descriptor{
+			v1.Descriptor{
 				MediaType: v1.MediaTypeImageLayerGzip,
 			},
 			nil,
 			digest.ErrDigestInvalidFormat,
 		},
 		{
-			distribution.Descriptor{
+			v1.Descriptor{
 				MediaType: v1.MediaTypeImageLayerGzip,
 			},
 			[]string{"https://foo/bar"},
 			digest.ErrDigestInvalidFormat,
 		},
 		{
-			distribution.Descriptor{
+			v1.Descriptor{
 				MediaType: v1.MediaTypeImageLayerGzip,
 				Digest:    digest.Digest("invalid"),
 			},
@@ -294,7 +290,7 @@ func TestVerifyOCIManifestBlobLayerAndConfig(t *testing.T) {
 		l := c.Desc
 		l.URLs = c.URLs
 
-		m.Layers = []distribution.Descriptor{l}
+		m.Layers = []v1.Descriptor{l}
 
 		checkFn(m, c.Err)
 	}
@@ -308,14 +304,14 @@ func TestVerifyOCIManifestBlobLayerAndConfig(t *testing.T) {
 		},
 		// invalid digest
 		{
-			distribution.Descriptor{
+			v1.Descriptor{
 				MediaType: v1.MediaTypeImageConfig,
 			},
 			[]string{"https://foo/bar"},
 			digest.ErrDigestInvalidFormat,
 		},
 		{
-			distribution.Descriptor{
+			v1.Descriptor{
 				MediaType: v1.MediaTypeImageConfig,
 				Digest:    digest.Digest("invalid"),
 			},

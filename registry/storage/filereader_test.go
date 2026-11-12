@@ -2,26 +2,27 @@ package storage
 
 import (
 	"bytes"
+	crand "crypto/rand"
 	"io"
 	mrand "math/rand"
 	"testing"
 
-	"github.com/distribution/distribution/v3/context"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
 	"github.com/opencontainers/go-digest"
 )
 
 func TestSimpleRead(t *testing.T) {
-	ctx := context.Background()
+	ctx := dcontext.Background()
 	content := make([]byte, 1<<20)
-	n, err := mrand.Read(content)
+	n, err := crand.Read(content)
 	if err != nil {
 		t.Fatalf("unexpected error building random data: %v", err)
 	}
 
 	if n != len(content) {
-		t.Fatalf("random read didn't fill buffer")
+		t.Fatal("random read didn't fill buffer")
 	}
 
 	dgst, err := digest.FromReader(bytes.NewReader(content))
@@ -42,10 +43,12 @@ func TestSimpleRead(t *testing.T) {
 	}
 
 	verifier := dgst.Verifier()
-	io.Copy(verifier, fr)
+	if _, err := io.Copy(verifier, fr); err != nil {
+		t.Fatalf("failed writing verification data: %v", err)
+	}
 
 	if !verifier.Verified() {
-		t.Fatalf("unable to verify read data")
+		t.Fatal("unable to verify read data")
 	}
 }
 
@@ -55,7 +58,7 @@ func TestFileReaderSeek(t *testing.T) {
 	repititions := 1024
 	path := "/patterned"
 	content := bytes.Repeat([]byte(pattern), repititions)
-	ctx := context.Background()
+	ctx := dcontext.Background()
 
 	if err := driver.PutContent(ctx, path, content); err != nil {
 		t.Fatalf("error putting patterned content: %v", err)
@@ -160,7 +163,7 @@ func TestFileReaderSeek(t *testing.T) {
 // is returned is quite common (if you allow blob deletion).
 func TestFileReaderNonExistentFile(t *testing.T) {
 	driver := inmemory.New()
-	_, err := newFileReader(context.Background(), driver, "/doesnotexist", 10)
+	_, err := newFileReader(dcontext.Background(), driver, "/doesnotexist", 10)
 	if err == nil {
 		t.Fatal("unexpected successful result")
 	}

@@ -7,16 +7,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/distribution/distribution/v3/internal/uuid"
 	"github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
-	"github.com/distribution/distribution/v3/uuid"
 )
 
 func testUploadFS(t *testing.T, numUploads int, repoName string, startedAt time.Time) (driver.StorageDriver, context.Context) {
 	d := inmemory.New()
 	ctx := context.Background()
-	for i := 0; i < numUploads; i++ {
-		addUploads(ctx, t, d, uuid.Generate().String(), repoName, startedAt)
+	for range numUploads {
+		addUploads(ctx, t, d, uuid.NewString(), repoName, startedAt)
 	}
 	return d, ctx
 }
@@ -24,19 +24,19 @@ func testUploadFS(t *testing.T, numUploads int, repoName string, startedAt time.
 func addUploads(ctx context.Context, t *testing.T, d driver.StorageDriver, uploadID, repo string, startedAt time.Time) {
 	dataPath, err := pathFor(uploadDataPathSpec{name: repo, id: uploadID})
 	if err != nil {
-		t.Fatalf("Unable to resolve path")
+		t.Fatal("Unable to resolve path")
 	}
 	if err := d.PutContent(ctx, dataPath, []byte("")); err != nil {
-		t.Fatalf("Unable to write data file")
+		t.Fatal("Unable to write data file")
 	}
 
 	startedAtPath, err := pathFor(uploadStartedAtPathSpec{name: repo, id: uploadID})
 	if err != nil {
-		t.Fatalf("Unable to resolve path")
+		t.Fatal("Unable to resolve path")
 	}
 
-	if d.PutContent(ctx, startedAtPath, []byte(startedAt.Format(time.RFC3339))); err != nil {
-		t.Fatalf("Unable to write startedAt file")
+	if err := d.PutContent(ctx, startedAtPath, []byte(startedAt.Format(time.RFC3339))); err != nil {
+		t.Fatal("Unable to write startedAt file")
 	}
 }
 
@@ -70,7 +70,7 @@ func TestPurgeAll(t *testing.T) {
 	fs, ctx := testUploadFS(t, uploadCount, "test-repo", oneHourAgo)
 
 	// Ensure > 1 repos are purged
-	addUploads(ctx, t, fs, uuid.Generate().String(), "test-repo2", oneHourAgo)
+	addUploads(ctx, t, fs, uuid.NewString(), "test-repo2", oneHourAgo)
 	uploadCount++
 
 	deleted, errs := PurgeUploads(ctx, fs, time.Now(), true)
@@ -91,8 +91,8 @@ func TestPurgeSome(t *testing.T) {
 
 	newUploadCount := 4
 
-	for i := 0; i < newUploadCount; i++ {
-		addUploads(ctx, t, fs, uuid.Generate().String(), "test-repo", time.Now().Add(1*time.Hour))
+	for range newUploadCount {
+		addUploads(ctx, t, fs, uuid.NewString(), "test-repo", time.Now().Add(1*time.Hour))
 	}
 
 	deleted, errs := PurgeUploads(ctx, fs, time.Now(), true)
@@ -112,18 +112,18 @@ func TestPurgeOnlyUploads(t *testing.T) {
 
 	// Create a directory tree outside _uploads and ensure
 	// these files aren't deleted.
-	dataPath, err := pathFor(uploadDataPathSpec{name: "test-repo", id: uuid.Generate().String()})
+	dataPath, err := pathFor(uploadDataPathSpec{name: "test-repo", id: uuid.NewString()})
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err)
 	}
-	nonUploadPath := strings.Replace(dataPath, "_upload", "_important", -1)
+	nonUploadPath := strings.ReplaceAll(dataPath, "_upload", "_important")
 	if strings.Contains(nonUploadPath, "_upload") {
-		t.Fatalf("Non-upload path not created correctly")
+		t.Fatal("Non-upload path not created correctly")
 	}
 
 	nonUploadFile := path.Join(nonUploadPath, "file")
 	if err = fs.PutContent(ctx, nonUploadFile, []byte("")); err != nil {
-		t.Fatalf("Unable to write data file")
+		t.Fatal("Unable to write data file")
 	}
 
 	deleted, errs := PurgeUploads(ctx, fs, time.Now(), true)
@@ -132,7 +132,7 @@ func TestPurgeOnlyUploads(t *testing.T) {
 	}
 	for _, file := range deleted {
 		if !strings.Contains(file, "_upload") {
-			t.Errorf("Non-upload file deleted")
+			t.Error("Non-upload file deleted")
 		}
 	}
 }

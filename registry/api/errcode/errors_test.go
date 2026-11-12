@@ -10,21 +10,21 @@ import (
 
 // TestErrorsManagement does a quick check of the Errors type to ensure that
 // members are properly pushed and marshaled.
-var ErrorCodeTest1 = Register("test.errors", ErrorDescriptor{
+var ErrorCodeTest1 = register("test.errors", ErrorDescriptor{
 	Value:          "TEST1",
 	Message:        "test error 1",
 	Description:    `Just a test message #1.`,
 	HTTPStatusCode: http.StatusInternalServerError,
 })
 
-var ErrorCodeTest2 = Register("test.errors", ErrorDescriptor{
+var ErrorCodeTest2 = register("test.errors", ErrorDescriptor{
 	Value:          "TEST2",
 	Message:        "test error 2",
 	Description:    `Just a test message #2.`,
 	HTTPStatusCode: http.StatusNotFound,
 })
 
-var ErrorCodeTest3 = Register("test.errors", ErrorDescriptor{
+var ErrorCodeTest3 = register("test.errors", ErrorDescriptor{
 	Value:          "TEST3",
 	Message:        "Sorry %q isn't valid",
 	Description:    `Just a test message #3.`,
@@ -40,7 +40,6 @@ func TestErrorCodes(t *testing.T) {
 	}
 
 	for ec := range errorCodeToDescriptors {
-		ec := ec
 		t.Run(ec.String(), func(t *testing.T) {
 			t.Parallel()
 			desc := errorCodeToDescriptors[ec]
@@ -67,7 +66,7 @@ func TestErrorCodes(t *testing.T) {
 			}
 
 			// First, unmarshal to interface and ensure we have a string.
-			var ecUnspecified interface{}
+			var ecUnspecified any
 			if err := json.Unmarshal(p, &ecUnspecified); err != nil {
 				t.Fatalf("error unmarshaling error code %v: %v", ec, err)
 			}
@@ -86,7 +85,7 @@ func TestErrorCodes(t *testing.T) {
 				t.Fatalf("unexpected error code during error code marshal/unmarshal: %v != %v", ecUnmarshaled, ec)
 			}
 
-			expectedErrorString := strings.ToLower(strings.Replace(ec.Descriptor().Value, "_", " ", -1))
+			expectedErrorString := strings.ToLower(strings.ReplaceAll(ec.Descriptor().Value, "_", " "))
 			if ec.Error() != expectedErrorString {
 				t.Fatalf("unexpected return from %v.Error(): %q != %q", ec, ec.Error(), expectedErrorString)
 			}
@@ -99,7 +98,7 @@ func TestErrorsManagement(t *testing.T) {
 
 	errs = append(errs, ErrorCodeTest1)
 	errs = append(errs, ErrorCodeTest2.WithDetail(
-		map[string]interface{}{"digest": "sometestblobsumdoesntmatter"}))
+		map[string]any{"digest": "sometestblobsumdoesntmatter"}))
 	errs = append(errs, ErrorCodeTest3.WithArgs("BOOGIE"))
 	errs = append(errs, ErrorCodeTest3.WithArgs("BOOGIE").WithDetail("data"))
 
@@ -169,7 +168,7 @@ func TestErrorsManagement(t *testing.T) {
 	e1 = ErrorCodeTest3.WithArgs("test1")
 	e2 := e1.WithArgs("test2")
 	if &e1 == &e2 {
-		t.Fatalf("args: e2 and e1 should not be the same, but they are")
+		t.Fatal("args: e2 and e1 should not be the same, but they are")
 	}
 	if e2.Message != `Sorry "test2" isn't valid` {
 		t.Fatalf("e2 had wrong message: %q", e2.Message)
@@ -180,7 +179,7 @@ func TestErrorsManagement(t *testing.T) {
 	e1 = ErrorCodeTest3.WithDetail("stuff1")
 	e2 = e1.WithDetail("stuff2")
 	if &e1 == &e2 {
-		t.Fatalf("detail: e2 and e1 should not be the same, but they are")
+		t.Fatal("detail: e2 and e1 should not be the same, but they are")
 	}
 	if e2.Detail != `stuff2` {
 		t.Fatalf("e2 had wrong detail: %q", e2.Detail)

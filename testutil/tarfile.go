@@ -3,14 +3,16 @@ package testutil
 import (
 	"archive/tar"
 	"bytes"
+	crand "crypto/rand"
 	"fmt"
 	"io"
 	mrand "math/rand"
 	"time"
 
 	"github.com/distribution/distribution/v3"
-	"github.com/distribution/distribution/v3/context"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/opencontainers/go-digest"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // CreateRandomTarFile creates a random tarfile, returning it as an
@@ -32,7 +34,7 @@ func CreateRandomTarFile() (rs io.ReadSeeker, dgst digest.Digest, err error) {
 		ChangeTime: time.Now(),
 	}
 
-	for fileNumber := 0; fileNumber < nFiles; fileNumber++ {
+	for fileNumber := range nFiles {
 		fileSize := mrand.Int63n(1<<20) + 1<<20
 
 		header.Name = fmt.Sprint(fileNumber)
@@ -45,7 +47,7 @@ func CreateRandomTarFile() (rs io.ReadSeeker, dgst digest.Digest, err error) {
 		randomData := make([]byte, fileSize)
 
 		// Fill up the buffer with some random data.
-		n, err := mrand.Read(randomData)
+		n, err := crand.Read(randomData)
 
 		if n != len(randomData) {
 			return nil, "", fmt.Errorf("short read creating random reader: %v bytes != %v bytes", n, len(randomData))
@@ -82,7 +84,7 @@ func CreateRandomTarFile() (rs io.ReadSeeker, dgst digest.Digest, err error) {
 // about the order of said digests (since they're all random anyway).
 func CreateRandomLayers(n int) (map[digest.Digest]io.ReadSeeker, error) {
 	digestMap := map[digest.Digest]io.ReadSeeker{}
-	for i := 0; i < n; i++ {
+	for range n {
 		rs, ds, err := CreateRandomTarFile()
 		if err != nil {
 			return nil, fmt.Errorf("unexpected error generating test layer file: %v", err)
@@ -95,7 +97,7 @@ func CreateRandomLayers(n int) (map[digest.Digest]io.ReadSeeker, error) {
 
 // UploadBlobs lets you upload blobs to a repository
 func UploadBlobs(repository distribution.Repository, layers map[digest.Digest]io.ReadSeeker) error {
-	ctx := context.Background()
+	ctx := dcontext.Background()
 	for dgst, rs := range layers {
 		wr, err := repository.Blobs(ctx).Create(ctx)
 		if err != nil {
@@ -106,7 +108,7 @@ func UploadBlobs(repository distribution.Repository, layers map[digest.Digest]io
 			return fmt.Errorf("unexpected error copying to upload: %v", err)
 		}
 
-		if _, err := wr.Commit(ctx, distribution.Descriptor{Digest: dgst}); err != nil {
+		if _, err := wr.Commit(ctx, v1.Descriptor{Digest: dgst}); err != nil {
 			return fmt.Errorf("unexpected error committinng upload: %v", err)
 		}
 	}

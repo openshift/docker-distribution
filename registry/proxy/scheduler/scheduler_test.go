@@ -2,12 +2,14 @@ package scheduler
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/distribution/distribution/v3/context"
-	"github.com/distribution/distribution/v3/reference"
+	"github.com/distribution/reference"
+
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	"github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
 )
 
@@ -30,20 +32,41 @@ func testRefs(t *testing.T) (reference.Reference, reference.Reference, reference
 	return ref1, ref2, ref3
 }
 
+func testRefsN(t *testing.T, n int) []reference.Canonical {
+	refs := make([]reference.Canonical, 0, n)
+	for i := range n {
+		name := "testrepo@sha256:" + fmt.Sprintf("%064d", i)
+
+		ref, err := reference.Parse(name)
+		if err != nil {
+			t.Fatalf("could not parse reference: %v", err)
+		}
+
+		canonical, ok := ref.(reference.Canonical)
+		if !ok {
+			t.Fatalf("not canonical reference: %v", ref)
+		}
+
+		refs = append(refs, canonical)
+	}
+
+	return refs
+}
+
 func TestSchedule(t *testing.T) {
-	ref1, ref2, ref3 := testRefs(t)
+	refs := testRefsN(t, 20)
 	timeUnit := time.Millisecond
-	remainingRepos := map[string]bool{
-		ref1.String(): true,
-		ref2.String(): true,
-		ref3.String(): true,
+
+	remainingRepos := map[string]bool{}
+	for _, ref := range refs {
+		remainingRepos[ref.String()] = true
 	}
 
 	var mu sync.Mutex
-	s := New(context.Background(), inmemory.New(), "/ttl")
+	s := New(dcontext.Background(), inmemory.New(), "/ttl")
 	deleteFunc := func(repoName reference.Reference) error {
 		if len(remainingRepos) == 0 {
-			t.Fatalf("Incorrect expiry count")
+			t.Fatal("Incorrect expiry count")
 		}
 		_, ok := remainingRepos[repoName.String()]
 		if !ok {
@@ -62,14 +85,9 @@ func TestSchedule(t *testing.T) {
 		t.Fatalf("Error starting ttlExpirationScheduler: %s", err)
 	}
 
-	s.add(ref1, 3*timeUnit, entryTypeBlob)
-	s.add(ref2, 1*timeUnit, entryTypeBlob)
-
-	func() {
-		s.Lock()
-		s.add(ref3, 1*timeUnit, entryTypeBlob)
-		s.Unlock()
-	}()
+	for i, ref := range refs {
+		_ = s.AddBlob(ref, time.Duration(i)*timeUnit)
+	}
 
 	// Ensure all repos are deleted
 	<-time.After(50 * timeUnit)
@@ -123,20 +141,25 @@ func TestRestoreOld(t *testing.T) {
 		t.Fatalf("Error serializing test data: %s", err.Error())
 	}
 
-	ctx := context.Background()
+	ctx := dcontext.Background()
 	pathToStatFile := "/ttl"
 	fs := inmemory.New()
 	err = fs.PutContent(ctx, pathToStatFile, serialized)
 	if err != nil {
 		t.Fatal("Unable to write serialized data to fs")
 	}
-	s := New(context.Background(), fs, "/ttl")
+	s := New(dcontext.Background(), fs, "/ttl")
 	s.OnBlobExpire(deleteFunc)
 	err = s.Start()
 	if err != nil {
 		t.Fatalf("Error starting ttlExpirationScheduler: %s", err)
 	}
-	defer s.Stop()
+	defer func(s *TTLExpirationScheduler) {
+		err := s.Stop()
+		if err != nil {
+			t.Fatalf("Error stopping ttlExpirationScheduler: %s", err)
+		}
+	}(s)
 
 	wg.Wait()
 	mu.Lock()
@@ -165,23 +188,26 @@ func TestStopRestore(t *testing.T) {
 
 	fs := inmemory.New()
 	pathToStateFile := "/ttl"
-	s := New(context.Background(), fs, pathToStateFile)
+	s := New(dcontext.Background(), fs, pathToStateFile)
 	s.onBlobExpire = deleteFunc
 
 	err := s.Start()
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err)
 	}
 	s.add(ref1, 300*timeUnit, entryTypeBlob)
 	s.add(ref2, 100*timeUnit, entryTypeBlob)
 
 	// Start and stop before all operations complete
 	// state will be written to fs
-	s.Stop()
+	err = s.Stop()
+	if err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(10 * time.Millisecond)
 
 	// v2 will restore state from fs
-	s2 := New(context.Background(), fs, pathToStateFile)
+	s2 := New(dcontext.Background(), fs, pathToStateFile)
 	s2.onBlobExpire = deleteFunc
 	err = s2.Start()
 	if err != nil {
@@ -197,13 +223,13 @@ func TestStopRestore(t *testing.T) {
 }
 
 func TestDoubleStart(t *testing.T) {
-	s := New(context.Background(), inmemory.New(), "/ttl")
+	s := New(dcontext.Background(), inmemory.New(), "/ttl")
 	err := s.Start()
 	if err != nil {
-		t.Fatalf("Unable to start scheduler")
+		t.Fatal("Unable to start scheduler")
 	}
 	err = s.Start()
 	if err == nil {
-		t.Fatalf("Scheduler started twice without error")
+		t.Fatal("Scheduler started twice without error")
 	}
 }

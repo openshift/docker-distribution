@@ -11,23 +11,31 @@ import (
 	"time"
 
 	"github.com/distribution/distribution/v3"
-	"github.com/distribution/distribution/v3/reference"
 	"github.com/distribution/distribution/v3/registry/proxy/scheduler"
 	"github.com/distribution/distribution/v3/registry/storage"
 	"github.com/distribution/distribution/v3/registry/storage/cache/memory"
 	"github.com/distribution/distribution/v3/registry/storage/driver/filesystem"
 	"github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
+	"github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-var sbsMu sync.Mutex
+var (
+	sbsMu      sync.Mutex
+	randSource rand.Rand
+)
 
 type statsBlobStore struct {
 	stats map[string]int
 	blobs distribution.BlobStore
 }
 
-func (sbs statsBlobStore) Put(ctx context.Context, mediaType string, p []byte) (distribution.Descriptor, error) {
+func init() {
+	randSource = *rand.New(rand.NewSource(42))
+}
+
+func (sbs statsBlobStore) Put(ctx context.Context, mediaType string, p []byte) (v1.Descriptor, error) {
 	sbsMu.Lock()
 	sbs.stats["put"]++
 	sbsMu.Unlock()
@@ -75,7 +83,7 @@ func (sbs statsBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter, 
 	return sbs.blobs.ServeBlob(ctx, w, r, dgst)
 }
 
-func (sbs statsBlobStore) Stat(ctx context.Context, dgst digest.Digest) (distribution.Descriptor, error) {
+func (sbs statsBlobStore) Stat(ctx context.Context, dgst digest.Digest) (v1.Descriptor, error) {
 	sbsMu.Lock()
 	sbs.stats["stat"]++
 	sbsMu.Unlock()
@@ -93,7 +101,7 @@ func (sbs statsBlobStore) Delete(ctx context.Context, dgst digest.Digest) error 
 
 type testEnv struct {
 	numUnique int
-	inRemote  []distribution.Descriptor
+	inRemote  []v1.Descriptor
 	store     proxyBlobStore
 	ctx       context.Context
 }
@@ -126,7 +134,7 @@ func makeTestEnv(t *testing.T, name string) *testEnv {
 	truthDir := t.TempDir()
 	cacheDir := t.TempDir()
 
-	localDriver, err := filesystem.FromParameters(map[string]interface{}{
+	localDriver, err := filesystem.FromParameters(map[string]any{
 		"rootdirectory": truthDir,
 	})
 	if err != nil {
@@ -143,7 +151,7 @@ func makeTestEnv(t *testing.T, name string) *testEnv {
 		t.Fatalf("unexpected error getting repo: %v", err)
 	}
 
-	cacheDriver, err := filesystem.FromParameters(map[string]interface{}{
+	cacheDriver, err := filesystem.FromParameters(map[string]any{
 		"rootdirectory": cacheDir,
 	})
 	if err != nil {
@@ -188,25 +196,21 @@ func makeTestEnv(t *testing.T, name string) *testEnv {
 
 func makeBlob(size int) []byte {
 	blob := make([]byte, size)
-	for i := 0; i < size; i++ {
-		blob[i] = byte('A' + rand.Int()%48)
+	for i := range size {
+		blob[i] = byte('A' + randSource.Int()%48)
 	}
 	return blob
 }
 
-func init() {
-	rand.Seed(42)
-}
-
 func populate(t *testing.T, te *testEnv, blobCount, size, numUnique int) {
-	var inRemote []distribution.Descriptor
+	var inRemote []v1.Descriptor
 
-	for i := 0; i < numUnique; i++ {
+	for range numUnique {
 		bytes := makeBlob(size)
 		for j := 0; j < blobCount/numUnique; j++ {
 			desc, err := te.store.remoteStore.Put(te.ctx, "", bytes)
 			if err != nil {
-				t.Fatalf("Put in store")
+				t.Fatal("Put in store")
 			}
 
 			inRemote = append(inRemote, desc)
@@ -251,6 +255,18 @@ func TestProxyStoreGet(t *testing.T) {
 	}
 }
 
+func TestProxyStoreGetWithoutScheduler(t *testing.T) {
+	te := makeTestEnv(t, "foo/bar")
+	te.store.scheduler = nil
+
+	populate(t, te, 1, 10, 1)
+
+	_, err := te.store.Get(te.ctx, te.inRemote[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProxyStoreStat(t *testing.T) {
 	te := makeTestEnv(t, "foo/bar")
 
@@ -264,7 +280,7 @@ func TestProxyStoreStat(t *testing.T) {
 	for _, d := range te.inRemote {
 		_, err := te.store.Stat(te.ctx, d.Digest)
 		if err != nil {
-			t.Fatalf("Error stating proxy store")
+			t.Fatal("Error stating proxy store")
 		}
 	}
 
@@ -307,13 +323,97 @@ func TestProxyStoreServeMany(t *testing.T) {
 func TestProxyStoreServeBig(t *testing.T) {
 	te := makeTestEnv(t, "foo/bar")
 
-	blobSize := 2 << 20
+	blobSize := 2 * 1024 * 1024
 	blobCount := 4
 	numUnique := 2
 	populate(t, te, blobCount, blobSize, numUnique)
 
 	numClients := 4
 	testProxyStoreServe(t, te, numClients)
+}
+
+func TestProxyStoreServeMetrics(t *testing.T) {
+	te := makeTestEnv(t, "foo/bar")
+
+	blobSize := 200
+	blobCount := 10
+	numUnique := 10
+	populate(t, te, blobCount, blobSize, numUnique)
+
+	numClients := 1
+	proxyMetrics = &proxyMetricsCollector{}
+	testProxyStoreServe(t, te, numClients)
+
+	expected := &proxyMetricsCollector{
+		blobMetrics: Metrics{
+			Requests:    uint64(blobCount*numClients + blobCount),
+			Hits:        uint64(blobCount),
+			Misses:      uint64(blobCount),
+			BytesPushed: uint64(blobSize*blobCount*numClients + blobSize*blobCount),
+			BytesPulled: uint64(blobSize * blobCount),
+		},
+	}
+
+	if proxyMetrics.blobMetrics.Requests != expected.blobMetrics.Requests {
+		t.Errorf("Expected blobMetrics.Requests %d but got %d", expected.blobMetrics.Requests, proxyMetrics.blobMetrics.Requests)
+	}
+	if proxyMetrics.blobMetrics.Hits != expected.blobMetrics.Hits {
+		t.Errorf("Expected blobMetrics.Hits %d but got %d", expected.blobMetrics.Hits, proxyMetrics.blobMetrics.Hits)
+	}
+	if proxyMetrics.blobMetrics.Misses != expected.blobMetrics.Misses {
+		t.Errorf("Expected blobMetrics.Misses %d but got %d", expected.blobMetrics.Misses, proxyMetrics.blobMetrics.Misses)
+	}
+	if proxyMetrics.blobMetrics.BytesPushed != expected.blobMetrics.BytesPushed {
+		t.Errorf("Expected blobMetrics.BytesPushed %d but got %d", expected.blobMetrics.BytesPushed, proxyMetrics.blobMetrics.BytesPushed)
+	}
+	if proxyMetrics.blobMetrics.BytesPulled != expected.blobMetrics.BytesPulled {
+		t.Errorf("Expected blobMetrics.BytesPulled %d but got %d", expected.blobMetrics.BytesPulled, proxyMetrics.blobMetrics.BytesPulled)
+	}
+}
+
+func TestProxyStoreServeMetricsConcurrent(t *testing.T) {
+	te := makeTestEnv(t, "foo/bar")
+
+	blobSize := 200
+	blobCount := 10
+	numUnique := 10
+	populate(t, te, blobCount, blobSize, numUnique)
+
+	numClients := 4
+	proxyMetrics = &proxyMetricsCollector{}
+	testProxyStoreServe(t, te, numClients)
+
+	expected := &proxyMetricsCollector{
+		blobMetrics: Metrics{
+			Requests:    uint64(blobCount*numClients + blobCount),
+			Hits:        uint64(blobCount),
+			Misses:      uint64(blobCount),
+			BytesPushed: uint64(blobSize*blobCount*numClients + blobSize*blobCount),
+			BytesPulled: uint64(blobSize * blobCount),
+		},
+	}
+
+	if proxyMetrics.blobMetrics.Requests != expected.blobMetrics.Requests {
+		t.Errorf("Expected blobMetrics.Requests %d but got %d", expected.blobMetrics.Requests, proxyMetrics.blobMetrics.Requests)
+	}
+	if proxyMetrics.blobMetrics.Hits+proxyMetrics.blobMetrics.Misses != expected.blobMetrics.Requests {
+		t.Errorf("Expected blobMetrics.Hits + blobMetrics.Misses %d but got %d", expected.blobMetrics.Requests, proxyMetrics.blobMetrics.Hits+proxyMetrics.blobMetrics.Misses)
+	}
+	if proxyMetrics.blobMetrics.Hits < expected.blobMetrics.Hits {
+		t.Errorf("Expect blobMetrics.Hits %d to be >= %d", proxyMetrics.blobMetrics.Hits, expected.blobMetrics.Hits)
+	}
+	if proxyMetrics.blobMetrics.Misses < expected.blobMetrics.Misses {
+		t.Errorf("Expect blobMetrics.Misses %d to be >= %d", proxyMetrics.blobMetrics.Misses, expected.blobMetrics.Misses)
+	}
+	if proxyMetrics.blobMetrics.BytesPushed != expected.blobMetrics.BytesPushed {
+		t.Errorf("Expected blobMetrics.BytesPushed %d but got %d", expected.blobMetrics.BytesPushed, proxyMetrics.blobMetrics.BytesPushed)
+	}
+	if proxyMetrics.blobMetrics.BytesPulled < expected.blobMetrics.BytesPulled {
+		t.Errorf("Expect blobMetrics.BytesPulled %d to be >= %d", proxyMetrics.blobMetrics.BytesPulled, expected.blobMetrics.BytesPulled)
+	}
+	if proxyMetrics.blobMetrics.BytesPulled > expected.blobMetrics.BytesPushed-expected.blobMetrics.BytesPulled {
+		t.Errorf("Expect blobMetrics.BytesPulled %d to be <= %d", proxyMetrics.blobMetrics.BytesPulled, expected.blobMetrics.BytesPushed-expected.blobMetrics.BytesPulled)
+	}
 }
 
 // testProxyStoreServe will create clients to consume all blobs
@@ -323,8 +423,14 @@ func testProxyStoreServe(t *testing.T, te *testEnv, numClients int) {
 	remoteStats := te.RemoteStats()
 
 	var wg sync.WaitGroup
+	var descHitMap = map[digest.Digest]bool{}
+	var hitLock sync.Mutex
 
-	for i := 0; i < numClients; i++ {
+	for _, remoteBlob := range te.inRemote {
+		descHitMap[remoteBlob.Digest] = true
+	}
+
+	for range numClients {
 		// Serveblob - pulls through blobs
 		wg.Add(1)
 		go func() {
@@ -339,16 +445,35 @@ func testProxyStoreServe(t *testing.T, te *testEnv, numClients int) {
 
 				err = te.store.ServeBlob(te.ctx, w, r, remoteBlob.Digest)
 				if err != nil {
-					t.Errorf(err.Error())
+					t.Error(err)
 					return
 				}
 
-				bodyBytes := w.Body.Bytes()
+				resp := w.Result()
+				bodyBytes, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					t.Error(err)
+					return
+				}
 				localDigest := digest.FromBytes(bodyBytes)
 				if localDigest != remoteBlob.Digest {
 					t.Errorf("Mismatching blob fetch from proxy")
 					return
 				}
+				if resp.Header.Get("Docker-Content-Digest") != localDigest.String() {
+					t.Errorf("Mismatching digest in response header")
+					return
+				}
+
+				desc, err := te.store.localStore.Stat(te.ctx, remoteBlob.Digest)
+				if err != nil {
+					continue
+				}
+
+				hitLock.Lock()
+				delete(descHitMap, desc.Digest)
+				hitLock.Unlock()
 			}
 		}()
 	}
@@ -358,11 +483,16 @@ func testProxyStoreServe(t *testing.T, te *testEnv, numClients int) {
 		t.FailNow()
 	}
 
+	if len(descHitMap) > 0 {
+		t.Errorf("Expected hit cache at least once, but it turns out that no caches was hit")
+		t.FailNow()
+	}
+
 	remoteBlobCount := len(te.inRemote)
 	sbsMu.Lock()
-	if (*localStats)["stat"] != remoteBlobCount*numClients && (*localStats)["create"] != te.numUnique {
+	if (*localStats)["stat"] != remoteBlobCount*numClients*2 && (*localStats)["create"] != te.numUnique {
 		sbsMu.Unlock()
-		t.Fatal("Expected: stat:", remoteBlobCount*numClients, "create:", remoteBlobCount)
+		t.Fatal("Expected: stat:", remoteBlobCount*numClients, "create:", remoteBlobCount, "Got: stat:", (*localStats)["stat"], "create:", (*localStats)["create"])
 	}
 	sbsMu.Unlock()
 
@@ -384,7 +514,7 @@ func testProxyStoreServe(t *testing.T, te *testEnv, numClients int) {
 
 		err = te.store.ServeBlob(te.ctx, w, r, dr.Digest)
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 
 		dl := digest.FromBytes(w.Body.Bytes())

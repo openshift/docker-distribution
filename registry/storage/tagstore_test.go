@@ -6,11 +6,12 @@ import (
 	"testing"
 
 	"github.com/distribution/distribution/v3"
-	"github.com/distribution/distribution/v3/manifest"
 	"github.com/distribution/distribution/v3/manifest/schema2"
-	"github.com/distribution/distribution/v3/reference"
 	"github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
+	"github.com/distribution/reference"
 	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 type tagsTestEnv struct {
@@ -24,7 +25,7 @@ type tagsTestEnv struct {
 func testTagStore(t *testing.T) *tagsTestEnv {
 	ctx := context.Background()
 	d := inmemory.New()
-	reg, err := NewRegistry(ctx, d)
+	reg, err := NewRegistry(ctx, d, EnableDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestTagStoreTag(t *testing.T) {
 	tags := env.ts
 	ctx := env.ctx
 
-	d := distribution.Descriptor{}
+	d := v1.Descriptor{}
 	err := tags.Tag(ctx, "latest", d)
 	if err == nil {
 		t.Errorf("unexpected error putting malformed descriptor : %s", err)
@@ -95,7 +96,7 @@ func TestTagStoreUnTag(t *testing.T) {
 	env := testTagStore(t)
 	tags := env.ts
 	ctx := env.ctx
-	desc := distribution.Descriptor{Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	desc := v1.Descriptor{Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
 
 	err := tags.Untag(ctx, "latest")
 	if err == nil {
@@ -119,6 +120,23 @@ func TestTagStoreUnTag(t *testing.T) {
 	}
 }
 
+func TestTagStoreUnTag_DeleteDisabled(t *testing.T) {
+	ctx := context.Background()
+	d := inmemory.New()
+	reg, err := NewRegistry(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRef, _ := reference.WithName("a/b")
+	repo, err := reg.Repository(ctx, repoRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Tags(ctx).Untag(ctx, "latest"); err != distribution.ErrUnsupported {
+		t.Errorf("expected distribution.ErrUnsupported, got %v", err)
+	}
+}
+
 func TestTagStoreAll(t *testing.T) {
 	env := testTagStore(t)
 	tagStore := env.ts
@@ -127,7 +145,7 @@ func TestTagStoreAll(t *testing.T) {
 	alpha := "abcdefghijklmnopqrstuvwxyz"
 	for i := 0; i < len(alpha); i++ {
 		tag := alpha[i]
-		desc := distribution.Descriptor{Digest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+		desc := v1.Descriptor{Digest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
 		err := tagStore.Tag(ctx, string(tag), desc)
 		if err != nil {
 			t.Error(err)
@@ -170,15 +188,15 @@ func TestTagLookup(t *testing.T) {
 	tagStore := env.ts
 	ctx := env.ctx
 
-	descA := distribution.Descriptor{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	desc0 := distribution.Descriptor{Digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+	descA := v1.Descriptor{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	desc0 := v1.Descriptor{Digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
 
 	tags, err := tagStore.Lookup(ctx, descA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(tags) != 0 {
-		t.Fatalf("Lookup returned > 0 tags from empty store")
+		t.Fatal("Lookup returned > 0 tags from empty store")
 	}
 
 	err = tagStore.Tag(ctx, "a", descA)
@@ -237,22 +255,20 @@ func TestTagIndexes(t *testing.T) {
 
 	t1Dgsts := make(map[digest.Digest]struct{})
 	t2Dgsts := make(map[digest.Digest]struct{})
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		layer, err := env.bs.Put(ctx, "application/octet-stream", []byte{byte(i + 1)})
 		if err != nil {
 			t.Fatal(err)
 		}
 		m := schema2.Manifest{
-			Versioned: manifest.Versioned{
-				SchemaVersion: 2,
-				MediaType:     schema2.MediaTypeManifest,
-			},
-			Config: distribution.Descriptor{
+			Versioned: specs.Versioned{SchemaVersion: 2},
+			MediaType: schema2.MediaTypeManifest,
+			Config: v1.Descriptor{
 				Digest:    conf.Digest,
 				Size:      1,
 				MediaType: schema2.MediaTypeImageConfig,
 			},
-			Layers: []distribution.Descriptor{
+			Layers: []v1.Descriptor{
 				{
 					Digest:    layer.Digest,
 					Size:      1,

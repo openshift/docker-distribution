@@ -2,110 +2,109 @@ package token
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/distribution/distribution/v3/context"
 	"github.com/distribution/distribution/v3/registry/auth"
-	"github.com/docker/libtrust"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-func makeRootKeys(numKeys int) ([]libtrust.PrivateKey, error) {
-	keys := make([]libtrust.PrivateKey, 0, numKeys)
+func makeRootKeys(numKeys int) ([]*ecdsa.PrivateKey, error) {
+	rootKeys := make([]*ecdsa.PrivateKey, 0, numKeys)
 
-	for i := 0; i < numKeys; i++ {
-		key, err := libtrust.GenerateECP256PrivateKey()
+	for range numKeys {
+		pk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			return nil, err
 		}
-		keys = append(keys, key)
+		rootKeys = append(rootKeys, pk)
 	}
 
-	return keys, nil
+	return rootKeys, nil
 }
 
-func makeSigningKeyWithChain(rootKey libtrust.PrivateKey, depth int) (libtrust.PrivateKey, error) {
+func makeRootCerts(rootKeys []*ecdsa.PrivateKey) ([]*x509.Certificate, error) {
+	rootCerts := make([]*x509.Certificate, 0, len(rootKeys))
+
+	for _, rootKey := range rootKeys {
+		cert, err := generateCACert(rootKey, rootKey)
+		if err != nil {
+			return nil, err
+		}
+		rootCerts = append(rootCerts, cert)
+	}
+
+	return rootCerts, nil
+}
+
+func makeSigningKeyWithChain(rootKey *ecdsa.PrivateKey, depth int) (*jose.JSONWebKey, error) {
 	if depth == 0 {
 		// Don't need to build a chain.
-		return rootKey, nil
+		return &jose.JSONWebKey{
+			Key:       rootKey,
+			KeyID:     rootKey.X.String(),
+			Algorithm: string(jose.ES256),
+		}, nil
 	}
 
 	var (
-		x5c       = make([]string, depth)
+		certs     = make([]*x509.Certificate, depth)
 		parentKey = rootKey
-		key       libtrust.PrivateKey
-		cert      *x509.Certificate
-		err       error
+
+		pk   *ecdsa.PrivateKey
+		cert *x509.Certificate
+		err  error
 	)
 
 	for depth > 0 {
-		if key, err = libtrust.GenerateECP256PrivateKey(); err != nil {
+		if pk, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
 			return nil, err
 		}
 
-		if cert, err = libtrust.GenerateCACert(parentKey, key); err != nil {
+		if cert, err = generateCACert(parentKey, pk); err != nil {
 			return nil, err
 		}
 
 		depth--
-		x5c[depth] = base64.StdEncoding.EncodeToString(cert.Raw)
-		parentKey = key
+		certs[depth] = cert
+		parentKey = pk
 	}
 
-	key.AddExtendedField("x5c", x5c)
-
-	return key, nil
+	return &jose.JSONWebKey{
+		Key:          parentKey,
+		KeyID:        rootKey.X.String(),
+		Algorithm:    string(jose.ES256),
+		Certificates: certs,
+	}, nil
 }
 
-func makeRootCerts(rootKeys []libtrust.PrivateKey) ([]*x509.Certificate, error) {
-	certs := make([]*x509.Certificate, 0, len(rootKeys))
-
-	for _, key := range rootKeys {
-		cert, err := libtrust.GenerateCACert(key, key)
-		if err != nil {
-			return nil, err
-		}
-		certs = append(certs, cert)
+func makeTestToken(jwk *jose.JSONWebKey, issuer, audience string, access []*ResourceActions, now time.Time, exp time.Time) (*Token, error) {
+	signingKey := jose.SigningKey{
+		Algorithm: jose.ES256,
+		Key:       jwk,
 	}
-
-	return certs, nil
-}
-
-func makeTrustedKeyMap(rootKeys []libtrust.PrivateKey) map[string]libtrust.PublicKey {
-	trustedKeys := make(map[string]libtrust.PublicKey, len(rootKeys))
-
-	for _, key := range rootKeys {
-		trustedKeys[key.KeyID()] = key.PublicKey()
+	signerOpts := jose.SignerOptions{
+		EmbedJWK: true,
 	}
+	signerOpts.WithType("JWT")
 
-	return trustedKeys
-}
-
-func makeTestToken(issuer, audience string, access []*ResourceActions, rootKey libtrust.PrivateKey, depth int, now time.Time, exp time.Time) (*Token, error) {
-	signingKey, err := makeSigningKeyWithChain(rootKey, depth)
+	signer, err := jose.NewSigner(signingKey, &signerOpts)
 	if err != nil {
-		return nil, fmt.Errorf("unable to make signing key with chain: %s", err)
-	}
-
-	var rawJWK json.RawMessage
-	rawJWK, err = signingKey.PublicKey().MarshalJSON()
-	if err != nil {
-		return nil, fmt.Errorf("unable to marshal signing key to JSON: %s", err)
-	}
-
-	joseHeader := &Header{
-		Type:       "JWT",
-		SigningAlg: "ES256",
-		RawJWK:     &rawJWK,
+		return nil, fmt.Errorf("unable to create a signer: %s", err)
 	}
 
 	randomBytes := make([]byte, 15)
@@ -124,28 +123,97 @@ func makeTestToken(issuer, audience string, access []*ResourceActions, rootKey l
 		Access:     access,
 	}
 
-	var joseHeaderBytes, claimSetBytes []byte
-
-	if joseHeaderBytes, err = json.Marshal(joseHeader); err != nil {
-		return nil, fmt.Errorf("unable to marshal jose header: %s", err)
-	}
-	if claimSetBytes, err = json.Marshal(claimSet); err != nil {
-		return nil, fmt.Errorf("unable to marshal claim set: %s", err)
+	tokenString, err := jwt.Signed(signer).Claims(claimSet).Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("unable to build token string: %v", err)
 	}
 
-	encodedJoseHeader := joseBase64UrlEncode(joseHeaderBytes)
-	encodedClaimSet := joseBase64UrlEncode(claimSetBytes)
-	encodingToSign := fmt.Sprintf("%s.%s", encodedJoseHeader, encodedClaimSet)
+	return NewToken(tokenString, []jose.SignatureAlgorithm{signingKey.Algorithm})
+}
 
-	var signatureBytes []byte
-	if signatureBytes, _, err = signingKey.Sign(strings.NewReader(encodingToSign), crypto.SHA256); err != nil {
-		return nil, fmt.Errorf("unable to sign jwt payload: %s", err)
+// NOTE(milosgajdos): certTemplateInfo type as well
+// as some of the functions in this file have been
+// adopted from https://github.com/docker/libtrust
+// and modiified to fit the purpose of the token package.
+
+type certTemplateInfo struct {
+	commonName  string
+	domains     []string
+	ipAddresses []net.IP
+	isCA        bool
+	clientAuth  bool
+	serverAuth  bool
+}
+
+func generateCertTemplate(info *certTemplateInfo) *x509.Certificate {
+	// Generate a certificate template which is valid from the past week to
+	// 10 years from now. The usage of the certificate depends on the
+	// specified fields in the given certTempInfo object.
+	var (
+		keyUsage    x509.KeyUsage
+		extKeyUsage []x509.ExtKeyUsage
+	)
+
+	if info.isCA {
+		keyUsage = x509.KeyUsageCertSign
 	}
 
-	signature := joseBase64UrlEncode(signatureBytes)
-	tokenString := fmt.Sprintf("%s.%s", encodingToSign, signature)
+	if info.clientAuth {
+		extKeyUsage = append(extKeyUsage, x509.ExtKeyUsageClientAuth)
+	}
 
-	return NewToken(tokenString)
+	if info.serverAuth {
+		extKeyUsage = append(extKeyUsage, x509.ExtKeyUsageServerAuth)
+	}
+
+	return &x509.Certificate{
+		SerialNumber: big.NewInt(0),
+		Subject: pkix.Name{
+			CommonName: info.commonName,
+		},
+		NotBefore:             time.Now().Add(-time.Hour * 24 * 7),
+		NotAfter:              time.Now().Add(time.Hour * 24 * 365 * 10),
+		DNSNames:              info.domains,
+		IPAddresses:           info.ipAddresses,
+		IsCA:                  info.isCA,
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           extKeyUsage,
+		BasicConstraintsValid: info.isCA,
+	}
+}
+
+func generateCert(priv crypto.PrivateKey, pub crypto.PublicKey, subInfo, issInfo *certTemplateInfo) (*x509.Certificate, error) {
+	pubCertTemplate := generateCertTemplate(subInfo)
+	privCertTemplate := generateCertTemplate(issInfo)
+
+	certDER, err := x509.CreateCertificate(
+		rand.Reader, pubCertTemplate, privCertTemplate,
+		pub, priv,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create certificate: %s", err)
+	}
+
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %s", err)
+	}
+
+	return cert, nil
+}
+
+// generateCACert creates a certificate which can be used as a trusted
+// certificate authority.
+func generateCACert(signer *ecdsa.PrivateKey, trustedKey *ecdsa.PrivateKey) (*x509.Certificate, error) {
+	subjectInfo := &certTemplateInfo{
+		commonName: trustedKey.X.String(),
+		isCA:       true,
+	}
+	issuerInfo := &certTemplateInfo{
+		commonName: signer.X.String(),
+	}
+
+	return generateCert(signer, trustedKey.Public(), subjectInfo, issuerInfo)
 }
 
 // This test makes 4 tokens with a varying number of intermediate
@@ -180,12 +248,17 @@ func TestTokenVerify(t *testing.T) {
 		rootPool.AddCert(rootCert)
 	}
 
-	trustedKeys := makeTrustedKeyMap(rootKeys)
-
 	tokens := make([]*Token, 0, numTokens)
+	trustedKeys := map[string]crypto.PublicKey{}
 
-	for i := 0; i < numTokens; i++ {
-		token, err := makeTestToken(issuer, audience, access, rootKeys[i], i, time.Now(), time.Now().Add(5*time.Minute))
+	for i := range numTokens {
+		jwk, err := makeSigningKeyWithChain(rootKeys[i], i)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// add to trusted keys
+		trustedKeys[jwk.KeyID] = jwk.Public()
+		token, err := makeTestToken(jwk, issuer, audience, access, time.Now(), time.Now().Add(5*time.Minute))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -200,7 +273,7 @@ func TestTokenVerify(t *testing.T) {
 	}
 
 	for _, token := range tokens {
-		if err := token.Verify(verifyOps); err != nil {
+		if _, err := token.Verify(verifyOps); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -226,7 +299,14 @@ func TestLeeway(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	trustedKeys := makeTrustedKeyMap(rootKeys)
+	jwk, err := makeSigningKeyWithChain(rootKeys[0], 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	trustedKeys := map[string]crypto.PublicKey{
+		jwk.KeyID: jwk.Public(),
+	}
 
 	verifyOps := VerifyOptions{
 		TrustedIssuers:    []string{issuer},
@@ -237,48 +317,48 @@ func TestLeeway(t *testing.T) {
 
 	// nbf verification should pass within leeway
 	futureNow := time.Now().Add(time.Duration(5) * time.Second)
-	token, err := makeTestToken(issuer, audience, access, rootKeys[0], 0, futureNow, futureNow.Add(5*time.Minute))
+	token, err := makeTestToken(jwk, issuer, audience, access, futureNow, futureNow.Add(5*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := token.Verify(verifyOps); err != nil {
+	if _, err := token.Verify(verifyOps); err != nil {
 		t.Fatal(err)
 	}
 
 	// nbf verification should fail with a skew larger than leeway
 	futureNow = time.Now().Add(time.Duration(61) * time.Second)
-	token, err = makeTestToken(issuer, audience, access, rootKeys[0], 0, futureNow, futureNow.Add(5*time.Minute))
+	token, err = makeTestToken(jwk, issuer, audience, access, futureNow, futureNow.Add(5*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = token.Verify(verifyOps); err == nil {
+	if _, err = token.Verify(verifyOps); err == nil {
 		t.Fatal("Verification should fail for token with nbf in the future outside leeway")
 	}
 
 	// exp verification should pass within leeway
-	token, err = makeTestToken(issuer, audience, access, rootKeys[0], 0, time.Now(), time.Now().Add(-59*time.Second))
+	token, err = makeTestToken(jwk, issuer, audience, access, time.Now(), time.Now().Add(-59*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = token.Verify(verifyOps); err != nil {
+	if _, err = token.Verify(verifyOps); err != nil {
 		t.Fatal(err)
 	}
 
 	// exp verification should fail with a skew larger than leeway
-	token, err = makeTestToken(issuer, audience, access, rootKeys[0], 0, time.Now(), time.Now().Add(-60*time.Second))
+	token, err = makeTestToken(jwk, issuer, audience, access, time.Now(), time.Now().Add(-60*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err = token.Verify(verifyOps); err == nil {
+	if _, err = token.Verify(verifyOps); err == nil {
 		t.Fatal("Verification should fail for token with exp in the future outside leeway")
 	}
 }
 
-func writeTempRootCerts(rootKeys []libtrust.PrivateKey) (filename string, err error) {
+func writeTempRootCerts(rootKeys []*ecdsa.PrivateKey) (filename string, err error) {
 	rootCerts, err := makeRootCerts(rootKeys)
 	if err != nil {
 		return "", err
@@ -298,6 +378,31 @@ func writeTempRootCerts(rootKeys []libtrust.PrivateKey) (filename string, err er
 			os.Remove(tempFile.Name())
 			return "", err
 		}
+	}
+
+	return tempFile.Name(), nil
+}
+
+func writeTempJWKS(rootKeys []*ecdsa.PrivateKey) (filename string, err error) {
+	keys := make([]jose.JSONWebKey, len(rootKeys))
+	for i := range rootKeys {
+		jwk, err := makeSigningKeyWithChain(rootKeys[i], i)
+		if err != nil {
+			return "", err
+		}
+		keys[i] = *jwk
+	}
+	jwks := jose.JSONWebKeySet{
+		Keys: keys,
+	}
+	tempFile, err := os.CreateTemp("", "jwksBundle")
+	if err != nil {
+		return "", err
+	}
+	defer tempFile.Close()
+
+	if err := json.NewEncoder(tempFile).Encode(jwks); err != nil {
+		return "", err
 	}
 
 	return tempFile.Name(), nil
@@ -323,16 +428,22 @@ func TestAccessController(t *testing.T) {
 	}
 	defer os.Remove(rootCertBundleFilename)
 
+	jwksFilename, err := writeTempJWKS(rootKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	realm := "https://auth.example.com/token/"
 	issuer := "test-issuer.example.com"
 	service := "test-service.example.com"
 
-	options := map[string]interface{}{
+	options := map[string]any{
 		"realm":          realm,
 		"issuer":         issuer,
 		"service":        service,
 		"rootcertbundle": rootCertBundleFilename,
 		"autoredirect":   false,
+		"jwks":           jwksFilename,
 	}
 
 	accessController, err := newAccessController(options)
@@ -354,8 +465,7 @@ func TestAccessController(t *testing.T) {
 		Action: "baz",
 	}
 
-	ctx := context.WithRequest(context.Background(), req)
-	authCtx, err := accessController.Authorized(ctx, testAccess)
+	grant, err := accessController.Authorized(req, testAccess)
 	challenge, ok := err.(auth.Challenge)
 	if !ok {
 		t.Fatal("accessController did not return a challenge")
@@ -365,27 +475,32 @@ func TestAccessController(t *testing.T) {
 		t.Fatalf("accessControler did not get expected error - got %s - expected %s", challenge, ErrTokenRequired)
 	}
 
-	if authCtx != nil {
-		t.Fatalf("expected nil auth context but got %s", authCtx)
+	if grant != nil {
+		t.Fatalf("expected nil auth grant but got %#v", grant)
 	}
 
 	// 2. Supply an invalid token.
+	invalidJwk, err := makeSigningKeyWithChain(rootKeys[1], 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	token, err := makeTestToken(
-		issuer, service,
+		invalidJwk, issuer, service,
 		[]*ResourceActions{{
 			Type:    testAccess.Type,
 			Name:    testAccess.Name,
 			Actions: []string{testAccess.Action},
 		}},
-		rootKeys[1], 1, time.Now(), time.Now().Add(5*time.Minute), // Everything is valid except the key which signed it.
+		time.Now(), time.Now().Add(5*time.Minute), // Everything is valid except the key which signed it.
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.compactRaw()))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.Raw))
 
-	authCtx, err = accessController.Authorized(ctx, testAccess)
+	grant, err = accessController.Authorized(req, testAccess)
 	challenge, ok = err.(auth.Challenge)
 	if !ok {
 		t.Fatal("accessController did not return a challenge")
@@ -395,23 +510,29 @@ func TestAccessController(t *testing.T) {
 		t.Fatalf("accessControler did not get expected error - got %s - expected %s", challenge, ErrTokenRequired)
 	}
 
-	if authCtx != nil {
-		t.Fatalf("expected nil auth context but got %s", authCtx)
+	if grant != nil {
+		t.Fatalf("expected nil auth grant but got %#v", grant)
+	}
+
+	// create a valid jwk
+	jwk, err := makeSigningKeyWithChain(rootKeys[0], 1)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// 3. Supply a token with insufficient access.
 	token, err = makeTestToken(
-		issuer, service,
+		jwk, issuer, service,
 		[]*ResourceActions{}, // No access specified.
-		rootKeys[0], 1, time.Now(), time.Now().Add(5*time.Minute),
+		time.Now(), time.Now().Add(5*time.Minute),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.compactRaw()))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.Raw))
 
-	authCtx, err = accessController.Authorized(ctx, testAccess)
+	grant, err = accessController.Authorized(req, testAccess)
 	challenge, ok = err.(auth.Challenge)
 	if !ok {
 		t.Fatal("accessController did not return a challenge")
@@ -421,57 +542,52 @@ func TestAccessController(t *testing.T) {
 		t.Fatalf("accessControler did not get expected error - got %s - expected %s", challenge, ErrInsufficientScope)
 	}
 
-	if authCtx != nil {
-		t.Fatalf("expected nil auth context but got %s", authCtx)
+	if grant != nil {
+		t.Fatalf("expected nil auth grant but got %#v", grant)
 	}
 
 	// 4. Supply the token we need, or deserve, or whatever.
 	token, err = makeTestToken(
-		issuer, service,
+		jwk, issuer, service,
 		[]*ResourceActions{{
 			Type:    testAccess.Type,
 			Name:    testAccess.Name,
 			Actions: []string{testAccess.Action},
 		}},
-		rootKeys[0], 1, time.Now(), time.Now().Add(5*time.Minute),
+		time.Now(), time.Now().Add(5*time.Minute),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.compactRaw()))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.Raw))
 
-	authCtx, err = accessController.Authorized(ctx, testAccess)
+	grant, err = accessController.Authorized(req, testAccess)
 	if err != nil {
 		t.Fatalf("accessController returned unexpected error: %s", err)
 	}
 
-	userInfo, ok := authCtx.Value(auth.UserKey).(auth.UserInfo)
-	if !ok {
-		t.Fatal("token accessController did not set auth.user context")
-	}
-
-	if userInfo.Name != "foo" {
-		t.Fatalf("expected user name %q, got %q", "foo", userInfo.Name)
+	if grant.User.Name != "foo" {
+		t.Fatalf("expected user name %q, got %q", "foo", grant.User.Name)
 	}
 
 	// 5. Supply a token with full admin rights, which is represented as "*".
 	token, err = makeTestToken(
-		issuer, service,
+		jwk, issuer, service,
 		[]*ResourceActions{{
 			Type:    testAccess.Type,
 			Name:    testAccess.Name,
 			Actions: []string{"*"},
 		}},
-		rootKeys[0], 1, time.Now(), time.Now().Add(5*time.Minute),
+		time.Now(), time.Now().Add(5*time.Minute),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.compactRaw()))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.Raw))
 
-	_, err = accessController.Authorized(ctx, testAccess)
+	_, err = accessController.Authorized(req, testAccess)
 	if err != nil {
 		t.Fatalf("accessController returned unexpected error: %s", err)
 	}
@@ -496,11 +612,11 @@ func TestNewAccessControllerPemBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyBlock, err := rootKeys[0].PEMBlock()
+	bytes, err := x509.MarshalECPrivateKey(rootKeys[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = pem.Encode(file, keyBlock)
+	_, err = file.Write(bytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +629,7 @@ func TestNewAccessControllerPemBlock(t *testing.T) {
 	issuer := "test-issuer.example.com"
 	service := "test-service.example.com"
 
-	options := map[string]interface{}{
+	options := map[string]any{
 		"realm":          realm,
 		"issuer":         issuer,
 		"service":        service,
@@ -528,5 +644,59 @@ func TestNewAccessControllerPemBlock(t *testing.T) {
 
 	if len(ac.(*accessController).rootCerts.Subjects()) != 2 { //nolint:staticcheck // FIXME(thaJeztah): ignore SA1019: ac.(*accessController).rootCerts.Subjects has been deprecated since Go 1.18: if s was returned by SystemCertPool, Subjects will not include the system roots. (staticcheck)
 		t.Fatal("accessController has the wrong number of certificates")
+	}
+}
+
+// This test makes sure the untrusted key can not be used in token verification.
+func TestVerifyJWKWithTrustedKey(t *testing.T) {
+	// Generate a test key pair
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubKey := privKey.Public()
+
+	// Create a JWK with no certificates
+	jwk := &jose.JSONWebKey{
+		Key:       privKey,
+		KeyID:     "test-key-id",
+		Use:       "sig",
+		Algorithm: string(jose.ES256),
+	}
+
+	// Create verify options with our public key as trusted
+	verifyOpts := VerifyOptions{
+		TrustedKeys: map[string]crypto.PublicKey{
+			"test-key-id": pubKey,
+		},
+	}
+
+	// Create test header
+	header := jose.Header{
+		JSONWebKey: jwk,
+	}
+
+	// Test the verifyJWK function
+	returnedKey, err := verifyJWK(header, verifyOpts)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify the returned key matches our trusted key
+	if returnedKey != pubKey {
+		t.Error("Returned key does not match the trusted key")
+	}
+
+	// Test with untrusted key
+	verifyOpts.TrustedKeys = map[string]crypto.PublicKey{
+		"different-key-id": pubKey,
+	}
+
+	_, err = verifyJWK(header, verifyOpts)
+	if err == nil {
+		t.Error("Expected error for untrusted key, got none")
+	}
+	if err.Error() != "untrusted JWK with no certificate chain" {
+		t.Errorf("Expected 'untrusted JWK with no certificate chain' error, got: %v", err)
 	}
 }

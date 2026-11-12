@@ -1,83 +1,68 @@
-//go:build include_gcs
-// +build include_gcs
-
 package gcs
 
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
 	"cloud.google.com/go/storage"
-	dcontext "github.com/distribution/distribution/v3/context"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	storagedriver "github.com/distribution/distribution/v3/registry/storage/driver"
 	"github.com/distribution/distribution/v3/registry/storage/driver/testsuites"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
-	"gopkg.in/check.v1"
 )
-
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) { check.TestingT(t) }
 
 var (
 	gcsDriverConstructor func(rootDirectory string) (storagedriver.StorageDriver, error)
-	skipGCS              func() string
+	skipCheck            func(tb testing.TB)
 	credentialsType      string
 )
 
 func init() {
 	bucket := os.Getenv("REGISTRY_STORAGE_GCS_BUCKET")
-	credentials_path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	credentials := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 	// Skip GCS storage driver tests if environment variable parameters are not provided
-	skipGCS = func() string {
-		if bucket == "" || credentials_path == "" {
-			return "The following environment variables must be set to enable these tests: REGISTRY_STORAGE_GCS_BUCKET, GOOGLE_APPLICATION_CREDENTIALS"
+	skipCheck = func(tb testing.TB) {
+		tb.Helper()
+
+		if bucket == "" || credentials == "" {
+			tb.Skip("The following environment variables must be set to enable these tests: REGISTRY_STORAGE_GCS_BUCKET, GOOGLE_APPLICATION_CREDENTIALS")
 		}
-		return ""
-	}
-
-	if skipGCS() != "" {
-		return
-	}
-
-	credentialsJSON, err := os.ReadFile(fmt.Sprint(credentials_path))
-	if err != nil {
-		panic(fmt.Sprintf("Error reading JSON key : %v", err))
-	}
-
-	root, err := os.MkdirTemp("", "driver-")
-	if err != nil {
-		panic(err)
-	}
-	defer os.Remove(root)
-	var ts oauth2.TokenSource
-	var email string
-	var privateKey []byte
-
-	creds, err := google.CredentialsFromJSON(context.Background(), []byte(credentialsJSON), storage.ScopeFullControl)
-	if err != nil {
-		panic(fmt.Sprintf("Error reading credentials json file : %s", err))
-	}
-	credentialsType = getTypeFromCredentialsJSON(creds.JSON)
-	email = getEmailFromCredentialsJSON(creds.JSON)
-	privateKey = getPrivateKeyFromCredentialsJSON(creds.JSON)
-
-	ts = creds.TokenSource
-
-	gcs, err := storage.NewClient(dcontext.Background(), option.WithCredentialsJSON(credentialsJSON))
-	if err != nil {
-		panic(fmt.Sprintf("Error initializing gcs client : %v", err))
 	}
 
 	gcsDriverConstructor = func(rootDirectory string) (storagedriver.StorageDriver, error) {
+		jsonKey, err := os.ReadFile(credentials)
+		if err != nil {
+			panic(fmt.Sprintf("Error reading JSON key : %v", err))
+		}
+
+		var ts oauth2.TokenSource
+		var email string
+		var privateKey []byte
+
+		creds, err := credentialsFromJSON(context.Background(), jsonKey)
+		if err != nil {
+			panic(fmt.Sprintf("Error reading credentials json file : %s", err))
+		}
+		credentialsType = getTypeFromCredentialsJSON(creds.JSON)
+		email = getEmailFromCredentialsJSON(creds.JSON)
+		privateKey = getPrivateKeyFromCredentialsJSON(creds.JSON)
+		ts = creds.TokenSource
+
+		gcs, err := storage.NewClient(dcontext.Background(), option.WithAuthCredentialsJSON(option.CredentialsType(credentialsType), jsonKey))
+		if err != nil {
+			panic(fmt.Sprintf("Error initializing gcs client : %v", err))
+		}
+
 		parameters := driverParameters{
 			bucket:         bucket,
-			rootDirectory:  root,
+			rootDirectory:  rootDirectory,
 			email:          email,
 			privateKey:     privateKey,
 			client:         oauth2.NewClient(dcontext.Background(), ts),
@@ -86,19 +71,38 @@ func init() {
 			maxConcurrency: 8,
 		}
 
-		return New(parameters)
+		return New(context.Background(), parameters)
 	}
+}
 
-	testsuites.RegisterSuite(func() (storagedriver.StorageDriver, error) {
+func newDriverConstructor(tb testing.TB) testsuites.DriverConstructor {
+	root := tb.TempDir()
+
+	return func() (storagedriver.StorageDriver, error) {
 		return gcsDriverConstructor(root)
-	}, skipGCS)
+	}
+}
+
+func TestCredentialsFromJSONRejectsUnsupportedType(t *testing.T) {
+	_, err := credentialsFromJSON(context.Background(), []byte(`{"type":"unsupported"}`))
+	if err == nil {
+		t.Fatal("credentialsFromJSON accepted an unsupported credential type")
+	}
+}
+
+func TestGCSDriverSuite(t *testing.T) {
+	skipCheck(t)
+	testsuites.Driver(t, newDriverConstructor(t), false)
+}
+
+func BenchmarkGCSDriverSuite(b *testing.B) {
+	skipCheck(b)
+	testsuites.BenchDriver(b, newDriverConstructor(b))
 }
 
 // Test Committing a FileWriter without having called Write
 func TestCommitEmpty(t *testing.T) {
-	if skipGCS() != "" {
-		t.Skip(skipGCS())
-	}
+	skipCheck(t)
 
 	validRoot := t.TempDir()
 
@@ -111,11 +115,12 @@ func TestCommitEmpty(t *testing.T) {
 	ctx := dcontext.Background()
 
 	writer, err := driver.Writer(ctx, filename, false)
+	// nolint:errcheck
 	defer driver.Delete(ctx, filename)
 	if err != nil {
 		t.Fatalf("driver.Writer: unexpected error: %v", err)
 	}
-	err = writer.Commit()
+	err = writer.Commit(context.Background())
 	if err != nil {
 		t.Fatalf("writer.Commit: unexpected error: %v", err)
 	}
@@ -138,9 +143,7 @@ func TestCommitEmpty(t *testing.T) {
 // Test Committing a FileWriter after having written exactly
 // defaultChunksize bytes.
 func TestCommit(t *testing.T) {
-	if skipGCS() != "" {
-		t.Skip(skipGCS())
-	}
+	skipCheck(t)
 
 	validRoot := t.TempDir()
 
@@ -154,6 +157,7 @@ func TestCommit(t *testing.T) {
 
 	contents := make([]byte, defaultChunkSize)
 	writer, err := driver.Writer(ctx, filename, false)
+	// nolint:errcheck
 	defer driver.Delete(ctx, filename)
 	if err != nil {
 		t.Fatalf("driver.Writer: unexpected error: %v", err)
@@ -162,7 +166,7 @@ func TestCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writer.Write: unexpected error: %v", err)
 	}
-	err = writer.Commit()
+	err = writer.Commit(context.Background())
 	if err != nil {
 		t.Fatalf("writer.Commit: unexpected error: %v", err)
 	}
@@ -183,9 +187,7 @@ func TestCommit(t *testing.T) {
 }
 
 func TestRetry(t *testing.T) {
-	if skipGCS() != "" {
-		t.Skip(skipGCS())
-	}
+	skipCheck(t)
 
 	assertError := func(expected string, observed error) {
 		observedMsg := "<nil>"
@@ -220,9 +222,7 @@ func TestRetry(t *testing.T) {
 }
 
 func TestEmptyRootList(t *testing.T) {
-	if skipGCS() != "" {
-		t.Skip(skipGCS())
-	}
+	skipCheck(t)
 
 	validRoot := t.TempDir()
 
@@ -255,6 +255,9 @@ func TestEmptyRootList(t *testing.T) {
 		}
 	}()
 	keys, err := emptyRootDriver.List(ctx, "/")
+	if err != nil {
+		t.Fatalf("unexpected error listing empty root content: %v", err)
+	}
 	for _, path := range keys {
 		if !storagedriver.PathRegexp.MatchString(path) {
 			t.Fatalf("unexpected string in path: %q != %q", path, storagedriver.PathRegexp)
@@ -262,6 +265,9 @@ func TestEmptyRootList(t *testing.T) {
 	}
 
 	keys, err = slashRootDriver.List(ctx, "/")
+	if err != nil {
+		t.Fatalf("unexpected error listing slash root content: %v", err)
+	}
 	for _, path := range keys {
 		if !storagedriver.PathRegexp.MatchString(path) {
 			t.Fatalf("unexpected string in path: %q != %q", path, storagedriver.PathRegexp)
@@ -271,9 +277,7 @@ func TestEmptyRootList(t *testing.T) {
 
 // TestMoveDirectory checks that moving a directory returns an error.
 func TestMoveDirectory(t *testing.T) {
-	if skipGCS() != "" {
-		t.Skip(skipGCS())
-	}
+	skipCheck(t)
 
 	validRoot := t.TempDir()
 
@@ -298,21 +302,15 @@ func TestMoveDirectory(t *testing.T) {
 
 	err = driver.Move(ctx, "/parent/dir", "/parent/other")
 	if err == nil {
-		t.Fatalf("Moving directory /parent/dir /parent/other should have return a non-nil error\n")
+		t.Fatal("Moving directory /parent/dir /parent/other should have return a non-nil error")
 	}
 }
 
 // Test getting signed URL for a stored object
 func TestURLFor(t *testing.T) {
-	if skipGCS() != "" {
-		t.Skip(skipGCS())
-	}
+	skipCheck(t)
 
-	validRoot, err := os.MkdirTemp("", "driver-")
-	if err != nil {
-		t.Fatalf("unexpected error creating temporary directory: %v", err)
-	}
-	defer os.Remove(validRoot)
+	validRoot := t.TempDir()
 
 	driver, err := gcsDriverConstructor(validRoot)
 	if err != nil {
@@ -332,7 +330,7 @@ func TestURLFor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writer.Write: unexpected error: %v", err)
 	}
-	err = writer.Commit()
+	err = writer.Commit(ctx)
 	if err != nil {
 		t.Fatalf("writer.Commit: unexpected error: %v", err)
 	}
@@ -344,23 +342,22 @@ func TestURLFor(t *testing.T) {
 		t.Fatalf("writer.Size: %d != %d", writer.Size(), len(contents))
 	}
 
-	options := make(map[string]interface{})
-
 	// fetch and verify if signed URL for the stored object is not empty
-	signedURL, err := driver.URLFor(ctx, filename, options)
+	signedURL, err := driver.RedirectURL(httptest.NewRequest(http.MethodGet, filename, nil), filename)
 
-	if credentialsType == "service_account" {
+	switch credentialsType {
+	case "service_account":
 		if err != nil {
-			t.Fatalf("driver.URLFor: unexpected error: %v", err)
+			t.Fatalf("driver.RedirectURL: unexpected error: %v", err)
 		}
 		if len(signedURL) == 0 {
 			t.Fatalf("signed URL is empty")
 		}
-	} else if credentialsType == "external_account" {
+	case "external_account":
 		if err == nil {
-			t.Fatalf("driver.URLFor: expected error: %v", storagedriver.ErrUnsupportedMethod{})
+			t.Fatalf("driver.RedirectURL: expected error: %v", storagedriver.ErrUnsupportedMethod{})
 		}
-	} else {
-		t.Fatalf("driver.URLFor: unexpected credentials type")
+	default:
+		t.Fatalf("driver.RedirectURL: unexpected credentials type")
 	}
 }
